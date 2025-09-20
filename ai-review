@@ -1,0 +1,75 @@
+name: ABAP AI Review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # PRコメント投稿に必要
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect ABAP diff
+        shell: bash
+        run: |
+          git fetch origin ${{ github.base_ref }} --depth=1
+          # ABAP拡張子のみ（必要に応じて追加）
+          git diff --unified=0 origin/${{ github.base_ref }}...HEAD \
+            -- '*.abap' '*.prog.abap' '*.clas.abap' '*.intf.abap' '*.incl.abap' > diff.patch || true
+          # LLM上限対策でサイズ制限（必要に応じて調整）
+          head -c 90000 diff.patch > diff.trunc.patch || true
+
+      - name: Skip if no diff
+        id: guard
+        shell: bash
+        run: |
+          if [ ! -s diff.trunc.patch ]; then
+            echo "No ABAP diff. Skipping review."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Call Dify Workflow
+        if: steps.guard.outputs.skip != 'true'
+        id: dify
+        env:
+          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}
+          DIFY_API_BASE: ${{ secrets.DIFY_API_BASE }}
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y jq
+          BODY=$(jq -n --arg diff "$(cat diff.trunc.patch)" \
+                      --arg repo "${{ github.repository }}" \
+                      --arg pr   "${{ github.event.number }}" \
+                      --arg user "${{ github.actor }}" \
+            '{
+               inputs: { code_diff: $diff, repo: $repo, pr_number: $pr },
+               response_mode: "blocking",
+               user: $user
+             }')
+          curl -sS -H "Authorization: Bearer $DIFY_API_KEY" \
+               -H "Content-Type: application/json" \
+               -d "$BODY" \
+               "$DIFY_API_BASE/workflows/run" > dify.json
+
+          echo "RAW=$(cat dify.json | jq -r '.data.outputs // {}' | base64 -w0)" >> $GITHUB_OUTPUT
+
+      - name: Extract review text
+        if: steps.guard.outputs.skip != 'true'
+        id: review
+        run: |
+          echo "${{ fromJSON(steps.dify.outputs.RAW).review 
+                || fromJSON(steps.dify.outputs.RAW).output
+                || fromJSON(steps.dify.outputs.RAW).text
+                || 'レビュー結果の取得に失敗しました。' }}" > review.md
+
+      - name: Post PR comment
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/issues/${{ github.event.number }}/comments \
+            -f body="$(cat review.md)"
