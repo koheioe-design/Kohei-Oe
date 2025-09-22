@@ -62,58 +62,68 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         id: dify
         env:
-          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}         # Workflowアプリの Server-side API Key
-          DIFY_API_BASE: ${{ secrets.DIFY_API_BASE }}       # 例: https://dify-novagrid.com/v1
+          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}
+          DIFY_API_BASE: ${{ secrets.DIFY_API_BASE }}       # https://dify-novagrid.com/v1
           DIFY_WORKFLOW_ID: ${{ secrets.DIFY_WORKFLOW_ID }} # 例: uNCqCaZfykMRl1r6
         run: |
           sudo apt-get update -y && sudo apt-get install -y jq
+
+          # --- 事前チェック＆URL整形 ---
+          if [ -z "${DIFY_WORKFLOW_ID:-}" ]; then
+            echo "ERROR: DIFY_WORKFLOW_ID is empty. Set repository secret."
+            exit 1
+          fi
+          API_BASE="${DIFY_API_BASE%/}"
+          URL="$API_BASE/workflows/run"
+          echo "Call URL: $URL"
+
+          # --- リクエストBODY作成（workflow_id をボディに入れる） ---
           BODY=$(jq -n \
-            --arg diff  "$(cat diff.trunc.patch)" \
-            --arg repo  "${{ github.repository }}" \
-            --arg pr    "${{ github.event.number }}" \
-            --arg user  "${{ github.actor }}" \
+            --arg wid  "${DIFY_WORKFLOW_ID}" \
+            --arg diff "$(cat diff.trunc.patch)" \
+            --arg repo "${{ github.repository }}" \
+            --arg pr   "${{ github.event.number }}" \
+            --arg user "${{ github.actor }}" \
             --arg author "${{ steps.meta.outputs.author }}" \
             --arg title  "${{ steps.meta.outputs.title }}" \
             --arg body   "${{ steps.meta.outputs.body }}" \
-            --arg changed_files "$(echo "${{ steps.meta.outputs.changed_files }}" | jq -c .)"\
+            --arg changed_files "${{ steps.meta.outputs.changed_files }}" \
             '{
-               inputs: {
-                 code_diff: $diff,
-                 repo: $repo,
-                 pr_number: ($pr|tonumber),
-                 author: $author,
-                 title: $title,
-                 body: $body,
-                 changed_files: $changed_files   # ← 文字列で送る
-               },
-               response_mode: "blocking",
-               user: $user
-             }')
+              workflow_id: $wid,
+              inputs: {
+                code_diff: $diff,
+                repo: $repo,
+                pr_number: ($pr|tonumber),
+                author: $author,
+                title: $title,
+                body: $body,
+                changed_files: $changed_files
+              },
+              response_mode: "blocking",
+              user: $user
+            }')
 
-          RESP=$(curl -sS -w "\n%{http_code}" \
+          # --- 呼び出し（リダイレクト/失敗検知つき） ---
+          RESP=$(curl -sS -fSL -w "\n%{http_code}" \
             -H "Authorization: Bearer $DIFY_API_KEY" \
             -H "Content-Type: application/json" \
             -d "$BODY" \
-            "$DIFY_API_BASE/workflows/${DIFY_WORKFLOW_ID}/run")
-        
+            "$URL")
+
           HTTP_CODE=$(echo "$RESP" | tail -n1)
           JSON=$(echo "$RESP" | sed '$d')
           echo "HTTP_CODE=$HTTP_CODE"
           echo "$JSON" > dify.json
-          
-          # デバッグ表示
-          echo "==== DIFY RAW ===="
-          cat dify.json
-          echo "=================="
-          
-          # ★ review または text を直接ファイルに出力
+
+          echo "==== DIFY RAW ===="; cat dify.json; echo "=================="
+
+          # LLM出力を拾ってファイル化（review/textどちらでも）
           jq -r '.data.outputs.review // .data.outputs.text // empty' dify.json > review.md
-          
-          # 応答が空なら調査用に JSON 丸ごと保存
           if [ ! -s review.md ]; then
             echo "(empty)" > review.md
             cat dify.json >> review.md
           fi
+
 
 
           # --- PRにコメント投稿 ---
