@@ -130,55 +130,80 @@ jobs:
           echo "HTTP_CODE=$HTTP_CODE"
           echo "$JSON" > dify.json
 
+          # 2xx 判定はそのまま
           if ! echo "$HTTP_CODE" | grep -qE '^2'; then
-            echo "(Dify error; HTTP_CODE=$HTTP_CODE)" > review.json
-            cat dify.json >> review.json
+            echo "(Dify error; HTTP_CODE=$HTTP_CODE)" > review_raw.json
+            cat dify.json >> review_raw.json
           else
-            # 正常時は data.outputs.* をそのまま review.json に保存（なければ dify.json を落とし込む）
-            jq '.data.outputs // .' dify.json > review.json
+            # outputs.review があれば最優先で取り出し。なければ outputs 全体 or dify.json
+            jq -r '
+              if .data? and .data.outputs? and (.data.outputs.review? // empty) then
+                .data.outputs.review
+              elif .review? then
+                .review
+              elif .data? and .data.outputs? then
+                .data.outputs
+              else
+                .
+              end
+            ' dify.json > review_raw.json
           fi
 
-      # --- 整形して Markdown を作る ---
+
       - name: Format Dify output to Markdown
         if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          # review.json が violations/improvements/notes を持つことを想定し、なければそのまま吐く
+          # review_raw.json が「JSON文字列」なら fromjson でオブジェクト化
           jq -r '
-            if (.violations or .improvements or .notes) then
-              "### 🤖 Dify ABAP レビュー結果\n" +
-              "\n#### 🚨 違反 (Violations)\n" +
-              ( if (.violations|length) > 0 then
-                  "| ルールID | 重大度 | 場所 | 内容 |\n" +
-                  "|----------|--------|------|------|\n" +
-                  ( .violations[] |
-                    "| " + (.rule_id|tostring) + " | " +
-                    (if .severity=="block" then "❌ block" else "⚠️ warn" end) + " | " +
-                    .location + " | " + .message + " |"
-                  )
-                else
-                  "_No violations_\n"
-                end
-              ) + "\n\n#### 🛠 改善提案 (Improvements)\n" +
-              ( if (.improvements|length) > 0 then
-                  ( .improvements[]
-                    | "**" + .title + "**\n説明: " + .explanation + "\n```abap\n" + .code + "\n```\n"
-                  )
-                else
-                  "_No suggestions_\n"
-                end
-              ) + "\n#### 📝 備考\n" +
-              ( if (.notes|length) > 0 then
-                  ( .notes[] | "- " + . ) | join("\n")
-                else
-                  "_No notes_"
-                end
-              )
-            else
-              "### 🤖 Dify ABAP レビュー結果\n\n```\n" + (input|tostring) + "\n```"
-            end
-          ' review.json review.json > review.md
+            def ensure_obj($x):
+              if $x|type == "object" then $x
+              elif $x|type == "string" then ( try ($x|fromjson) catch {"raw":$x} )
+              else {"raw":($x|tostring)}
+              end;
+      
+            # まずファイル全体を読み、それをオブジェクト化
+            (input) as $raw
+            | (ensure_obj($raw)) as $r
+      
+            | if ($r.violations or $r.improvements or $r.notes) then
+                "### 🤖 Dify ABAP レビュー結果\n" +
+                "\n#### 🚨 違反 (Violations)\n" +
+                ( if ($r.violations|length) > 0 then
+                    "| ルールID | 重大度 | 場所 | 内容 |\n" +
+                    "|----------|--------|------|------|\n" +
+                    ( $r.violations[] |
+                      "| " + (.rule_id|tostring) + " | " +
+                      (if .severity=="block" then "❌ block" else "⚠️ warn" end) + " | " +
+                      .location + " | " + .message + " |"
+                    )
+                  else
+                    "_No violations_\n"
+                  end
+                ) +
+                "\n\n#### 🛠 改善提案 (Improvements)\n" +
+                ( if ($r.improvements|length) > 0 then
+                    ( $r.improvements[]
+                      | "**" + .title + "**\n説明: " + .explanation + "\n```abap\n" + .code + "\n```\n"
+                    )
+                  else
+                    "_No suggestions_\n"
+                  end
+                ) +
+                "\n#### 📝 備考\n" +
+                ( if ($r.notes|length) > 0 then
+                    ( $r.notes[] | "- " + . ) | join("\n")
+                  else
+                    "_No notes_"
+                  end
+                )
+              else
+                # 期待するキーが無い場合は生出力を表示
+                "### 🤖 Dify ABAP レビュー結果\n\n```\n" + ($raw|tostring) + "\n```"
+              end
+          ' review_raw.json > review.md
+
 
       # --- PRにコメント投稿 ---
       - name: Post PR comment
