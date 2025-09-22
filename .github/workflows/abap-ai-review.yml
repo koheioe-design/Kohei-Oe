@@ -14,7 +14,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      # （任意）フォークPRはSecretsが渡らないのでスキップ
+      - name: Skip on fork PR (no secrets)
+        id: fork_guard
+        run: |
+          if [ "${{ github.event.pull_request.head.repo.fork }}" = "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Fork PR detected. Skipping because secrets are not available."
+          fi
+
       - name: Collect ABAP diff
+        if: steps.fork_guard.outputs.skip != 'true'
         shell: bash
         run: |
           git fetch origin ${{ github.base_ref }} --depth=1
@@ -25,6 +35,7 @@ jobs:
           head -c 90000 diff.patch > diff.trunc.patch || true
 
       - name: Skip if no diff
+        if: steps.fork_guard.outputs.skip != 'true'
         id: guard
         shell: bash
         run: |
@@ -33,43 +44,105 @@ jobs:
             echo "skip=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Call Dify Workflow
-        if: steps.guard.outputs.skip != 'true'
-        id: dify
-        env:
-          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}
-          DIFY_API_BASE: ${{ secrets.DIFY_API_BASE }}
-        run: |
-          sudo apt-get update -y && sudo apt-get install -y jq
-          BODY=$(jq -n --arg diff "$(cat diff.trunc.patch)" \
-                      --arg repo "${{ github.repository }}" \
-                      --arg pr   "${{ github.event.number }}" \
-                      --arg user "${{ github.actor }}" \
-            '{
-               inputs: { code_diff: $diff, repo: $repo, pr_number: $pr },
-               response_mode: "blocking",
-               user: $user
-             }')
-          curl -sS -H "Authorization: Bearer $DIFY_API_KEY" \
-               -H "Content-Type: application/json" \
-               -d "$BODY" \
-               "$DIFY_API_BASE/workflows/run" > dify.json
-
-          echo "RAW=$(cat dify.json | jq -r '.data.outputs // {}' | base64 -w0)" >> $GITHUB_OUTPUT
-
-      - name: Extract review text
-        if: steps.guard.outputs.skip != 'true'
-        id: review
-        run: |
-          echo "${{ fromJSON(steps.dify.outputs.RAW).review 
-                || fromJSON(steps.dify.outputs.RAW).output
-                || fromJSON(steps.dify.outputs.RAW).text
-                || 'レビュー結果の取得に失敗しました。' }}" > review.md
-
-      - name: Post PR comment
-        if: steps.guard.outputs.skip != 'true'
+      # PRメタ情報の収集（title / body / author / changed_files）
+      - name: Collect PR metadata
+        if: steps.guard.outputs.skip != 'true' && steps.fork_guard.outputs.skip != 'true'
+        id: meta
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          REPO="${{ github.repository }}"
+          NUM="${{ github.event.number }}"
+          PR_JSON=$(gh api repos/$REPO/pulls/$NUM)
+          FILES_JSON=$(gh api repos/$REPO/pulls/$NUM/files -q '.[] | {filename, status}' | jq -s .)
+
+          echo "title=$(echo "$PR_JSON" | jq -r '.title')" >> $GITHUB_OUTPUT
+          # bodyがnullのケースに備えて空文字フォールバック
+          echo "body=$(echo "$PR_JSON" | jq -r '.body // ""' | tr -d '\r' )" >> $GITHUB_OUTPUT
+          echo "author=$(echo "$PR_JSON" | jq -r '.user.login')" >> $GITHUB_OUTPUT
+          # JSON文字列をそのまま渡せるようbase64エンコードしておく
+          echo "changed_files_b64=$(echo "$FILES_JSON" | base64 -w0)" >> $GITHUB_OUTPUT
+
+      - name: Call Dify Workflow
+        if: steps.guard.outputs.skip != 'true' && steps.fork_guard.outputs.skip != 'true'
+        id: dify
+        env:
+          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}
+          DIFY_API_BASE: ${{ secrets.DIFY_API_BASE }}   # 例: https://api.dify.ai/v1 もしくは Self-host
+        run: |
+          set -e
+          sudo apt-get update -y && sudo apt-get install -y jq
+          DIFF="$(cat diff.trunc.patch)"
+          CHANGED_FILES_JSON="$(echo "${{ steps.meta.outputs.changed_files_b64 }}" | base64 -d)"
+          BODY=$(jq -n \
+            --arg diff   "$DIFF" \
+            --arg repo   "${{ github.repository }}" \
+            --arg pr     "${{ github.event.number }}" \
+            --arg user   "${{ steps.meta.outputs.author }}" \
+            --arg title  "${{ steps.meta.outputs.title }}" \
+            --arg body   "${{ steps.meta.outputs.body }}" \
+            --argjson changed_files "$CHANGED_FILES_JSON" \
+            '{
+               inputs: {
+                 code_diff: $diff,
+                 repo: $repo,
+                 pr_number: ($pr|tonumber),
+                 author: $user,
+                 title: $title,
+                 body: $body,
+                 changed_files: $changed_files
+               },
+               response_mode: "blocking",
+               user: $user
+             }')
+
+          # 例: $DIFY_API_BASE/workflows/<WORKFLOW_ID>/run または /workflows/run のどちらか
+          # あなたの環境に合わせて末尾を調整してください
+          RESP=$(curl -sS -w "\n%{http_code}" -H "Authorization: Bearer $DIFY_API_KEY" \
+               -H "Content-Type: application/json" \
+               -d "$BODY" \
+               "$DIFY_API_BASE/workflows/run")
+
+          HTTP_CODE=$(echo "$RESP" | tail -n1)
+          JSON=$(echo "$RESP" | sed '$d')
+          echo "$JSON" > dify.json
+          echo "http_code=$HTTP_CODE"
+          jq -r '.' dify.json || true
+
+          # 期待キーを広めに探索して出力を拾う
+          REVIEW=$(
+            jq -r '
+              .data.outputs.result
+              // .data.outputs.review
+              // .data.outputs.output
+              // .data.outputs.text
+              // .data.result
+              // .result
+              // .message
+              // empty
+            ' dify.json
+          )
+          if [ -z "$REVIEW" ]; then
+            REVIEW="レビュー結果の取得に失敗しました。raw: ${JSON}"
+          fi
+
+          # 後続へ安全に受け渡し
+          echo "REVIEW_B64=$(printf "%s" "$REVIEW" | base64 -w0)" >> $GITHUB_OUTPUT
+
+      - name: Post PR comment
+        if: steps.guard.outputs.skip != 'true' && steps.fork_guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REVIEW="$(echo "${{ steps.dify.outputs.REVIEW_B64 }}" | base64 -d)"
+          # そのまま貼ると長大になりがちなので見出しとコードブロックで整形
+          {
+            echo "### 🤖 Dify 規約レビュー"
+            echo
+            echo "\`\`\`"
+            echo "$REVIEW"
+            echo "\`\`\`"
+          } > review.md
+
           gh api repos/${{ github.repository }}/issues/${{ github.event.number }}/comments \
             -f body="$(cat review.md)"
