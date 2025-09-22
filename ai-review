@@ -95,40 +95,40 @@ jobs:
             -H "Content-Type: application/json" \
             -d "$BODY" \
             "$DIFY_API_BASE/workflows/${DIFY_WORKFLOW_ID}/run")
-
+        
           HTTP_CODE=$(echo "$RESP" | tail -n1)
           JSON=$(echo "$RESP" | sed '$d')
           echo "HTTP_CODE=$HTTP_CODE"
           echo "$JSON" > dify.json
-          # 必要ならログで確認
-          jq -r '.' dify.json || true
+          
+          # デバッグ表示
+          echo "==== DIFY RAW ===="
+          cat dify.json
+          echo "=================="
+          
+          # ★ review または text を直接ファイルに出力
+          jq -r '.data.outputs.review // .data.outputs.text // empty' dify.json > review.md
+          
+          # 応答が空なら調査用に JSON 丸ごと保存
+          if [ ! -s review.md ]; then
+            echo "(empty)" > review.md
+            cat dify.json >> review.md
+          fi
 
-          # 応答の取り出し（キー名の揺れに広く対応）
-          echo "RAW=$(jq -r '
-            .data.outputs.result
-            // .data.outputs.review
-            // .data.outputs.output
-            // .data.outputs.text
-            // .data.result
-            // .result
-            // .message
-            // {}
-          ' dify.json | base64 -w0)" >> $GITHUB_OUTPUT
 
-      # --- PRにコメント投稿 ---
-      - name: Post PR comment
-        if: steps.guard.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          REVIEW="$(echo "${{ steps.dify.outputs.RAW }}" | base64 -d)"
-          {
-            echo "### 🤖 Dify 規約レビュー"
-            echo
-            echo "\`\`\`"
-            echo "$REVIEW"
-            echo "\`\`\`"
-          } > review.md
-
-          gh api repos/${{ github.repository }}/issues/${{ github.event.number }}/comments \
-            -f body="$(cat review.md)"
+          # --- PRにコメント投稿 ---
+          - name: Post PR comment
+            if: steps.guard.outputs.skip != 'true'
+            env:
+              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            run: |
+              {
+                echo "### 🤖 Dify 規約レビュー"
+                echo
+                echo '```json'
+                cat review.md
+                echo '```'
+              } > comment.md
+        
+              gh api repos/${{ github.repository }}/issues/${{ github.event.number }}/comments \
+                -f body="$(cat comment.md)"
