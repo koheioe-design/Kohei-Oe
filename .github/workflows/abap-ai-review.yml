@@ -212,10 +212,10 @@ jobs:
             | ($r.improvements // []) as $i_raw
             | ($r.notes       // []) as $n_raw
             | ($r.raw         // null) as $raw_only
-
-            | ($v_raw | (type=="array" ? unique_by(.rule_id)        : [])) as $viol
-            | ($i_raw | (type=="array" ? unique_by([.title,.code])  : [])) as $impr
-            | ($n_raw | (type=="array" ? unique                     : [])) as $notes
+            
+            | ($v_raw | if type=="array" then unique_by(.rule_id) else [] end) as $viol
+            | ($i_raw | if type=="array" then unique_by([.title,.code]) else [] end) as $impr
+            | ($n_raw | if type=="array" then unique else [] end) as $notes
 
             | if ($viol|length + $impr|length + $notes|length) == 0 and ($raw_only != null) then
                 "### 🤖 Dify ABAP レビュー結果\n\n"
