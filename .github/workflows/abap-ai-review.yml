@@ -223,44 +223,44 @@ jobs:
             | ($n_raw | (type=="array"    ? unique                        : [])) as $notes
 
             # --- 出力を作る ---
-            | if ($viol|length + $impr|length + $notes|length) == 0 and ($raw_only != null) then
-                # 解析不能だった場合はそのまま貼る
-                "### 🤖 Dify ABAP レビュー結果\n\n" +
-                "_Parser note: 非構造テキストのため生文貼付_\n\n" +
-                $raw_only
-              else
-                "### 🤖 Dify ABAP レビュー結果\n"
-                + "\n#### 🚨 違反 (Violations)\n"
-                + ( if ($viol|length) > 0 then
-                      "| ルールID | 重大度 | 場所 | 内容 |\n"
-                      + "|----------|--------|------|------|\n"
-                      + ( $viol[]
-                          | "| " + (.rule_id|tostring) + " | "
-                          + sev(.severity) + " | "
-                          + (.location // "-") + " | "
-                          + (.message  // "-") + " |"
-                        )
-                      | join("\n")
-                    else
-                      "_No violations_"
-                  end )
-                + "\n\n#### 🛠 改善提案 (Improvements)\n"
-                + ( if ($impr|length) > 0 then
-                      ( $impr[]
-                        | "**" + (.title // "Suggestion") + "**\n"
-                        + "説明: " + (.explanation // "-") + "\n"
-                        + "```abap\n" + (.code // "") + "\n```\n"
-                      )
-                      | join("\n")
-                    else
-                      "_No suggestions_"
-                  end )
-                + "\n\n#### 📝 備考\n"
-                + ( if ($notes|length) > 0
-                    then ($notes | map("- " + .) | join("\n"))
-                    else "_No notes_"
-                  end )
-              end
+            | if (((($viol | length) + ($impr | length) + ($notes | length)) == 0) and ($raw_only != null)) then
+            # 1) JSONエスケープを解除（失敗したらそのまま）
+            ( $raw_only | (try fromjson catch .) )
+            # 2) "abap" 単独行 → ```abap に変換（重複 "abap\nabap\n" も吸収）
+            | gsub("\r"; "")
+            | gsub("\nabap\nabap\n"; "\n```abap\n")
+            | gsub("\nabap\n"; "\n```abap\n")
+            # 3) 連続の空行を「コードブロック終了 + 改行」に変換（簡易クローズ）
+            | gsub("\n\n\n"; "\n```\n\n")
+          else
+            /* ← ここから下は既存の整形（Violations/Improvements/Notes）そのまま */
+            "### 🤖 Dify ABAP レビュー結果\n"
+            + "\n#### 🚨 違反 (Violations)\n"
+            + ( if (($viol | length) > 0) then
+                  "| ルールID | 重大度 | 場所 | 内容 |\n"
+                  + "|----------|--------|------|------|\n"
+                  + ( [ $viol[]
+                      | "| " + (.rule_id|tostring) + " | "
+                      + sev(.severity) + " | "
+                      + (.location // "-") + " | "
+                      + (.message  // "-") + " |"
+                    ] | join("\n") )
+                else "_No violations_" end )
+            + "\n\n#### 🛠 改善提案 (Improvements)\n"
+            + ( if (($impr | length) > 0) then
+                  ( [ $impr[]
+                      | "**" + (.title // "Suggestion") + "**\n"
+                      + "説明: " + (.explanation // "-") + "\n"
+                      + "```abap\n" + (.code // "") + "\n```\n"
+                    ] | join("\n") )
+                else "_No suggestions_" end )
+            + "\n\n#### 📝 備考\n"
+            + ( if (($notes | length) > 0)
+                then ($notes | map("- " + .) | join("\n"))
+                else "_No notes_"
+              end )
+          end
+
           ' review_raw.json > review.md
 
       # --- (任意) Block違反を一覧して即Failさせたい場合の安全版 ---
