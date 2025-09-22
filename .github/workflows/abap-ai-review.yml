@@ -263,6 +263,16 @@ jobs:
           # review_raw.json は JSONでも生テキストでもOK。-R -s で常にテキストとして読み込み → jq 側で判定
           jq -R -s -f _format.jq review_raw.json > review.md
 
+      - name: Show rendered review.md in summary
+        if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        run: |
+          {
+            echo "### Rendered Review (preview)"
+            echo
+            cat review.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
 
 
       # --- (任意) Block違反を一覧して即Failさせたい場合の安全版 ---
@@ -271,26 +281,32 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # review_raw.json から block のみ抽出（無ければ空配列）
+      
+          # block だけ抽出（なければ空配列）
           jq '[.violations[]? | select(.severity=="block")]' review_raw.json > _blocks.json 2>/dev/null || echo "[]" > _blocks.json
           BLOCK_COUNT=$(jq 'length' _blocks.json)
-
-          # Job Summary に表を出す
+      
+          # Job Summary（見やすい表）
           {
             echo "### ❌ Block violations ($BLOCK_COUNT)"
             if [ "$BLOCK_COUNT" -gt 0 ]; then
               echo
-              echo "| ルールID | 場所 | 内容 |"
-              echo "|---|---|---|"
-              jq -r '.[] | "| \(.rule_id) | \(.location // "-") | \(.message // "-") |"' _blocks.json
+              echo "| ルールID | 重大度 | 場所 | 内容 |"
+              echo "|---|---|---|---|"
+              jq -r '.[] | "| \(.rule_id) | \(.severity) | \(.location // "-") | \(.message // "-") |"' _blocks.json
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-
-          # 件数で失敗
+      
+          # ログにもJSONで詳細を出す
+          echo "---- blocks detail (json) ----"
+          jq . _blocks.json || true
+          echo "------------------------------"
+      
           if [ "$BLOCK_COUNT" -gt 0 ]; then
             echo "❌ Block violations detected: $BLOCK_COUNT"
             exit 1
           fi
+
 
 
       # --- PRにコメント投稿 ---
