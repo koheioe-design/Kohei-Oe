@@ -91,6 +91,10 @@ jobs:
         run: |
           set -euo pipefail
 
+
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+
           [ -n "${DIFY_WORKFLOW_ID:-}" ] || { echo "ERROR: DIFY_WORKFLOW_ID is empty."; exit 1; }
 
           _base="${DIFY_API_BASE%/}"
@@ -99,6 +103,9 @@ jobs:
           fi
           URL="$_base/workflows/run"
           echo "Call URL: $URL"
+
+
+          # changed_files は“文字列”で渡す（Dify側：段落 32768）
 
           BODY=$(jq -n \
             --arg wid   "${DIFY_WORKFLOW_ID}" \
@@ -125,6 +132,9 @@ jobs:
                user: $user
              }')
 
+
+          # 本文とHTTPコードを両取りして自前判定
+
           RESP=$(curl -sS -L -w "\n%{http_code}" \
             -H "Authorization: Bearer $DIFY_API_KEY" \
             -H "Content-Type: application/json" \
@@ -136,10 +146,16 @@ jobs:
           echo "HTTP_CODE=$HTTP_CODE"
           echo "$JSON" > dify.json
 
+
+          # 2xx 判定はそのまま取り出し、非2xxはエラーメッセージを格納
+
           if ! echo "$HTTP_CODE" | grep -qE '^2'; then
             echo "(Dify error; HTTP_CODE=$HTTP_CODE)" > review_raw.json
             cat dify.json >> review_raw.json
           else
+
+            # outputs.review を最優先。なければ outputs 全体。さらにフォールバックで全体。
+
             jq -r '
               if .data? and .data.outputs? and (.data.outputs.review? // empty) then
                 .data.outputs.review
@@ -151,6 +167,23 @@ jobs:
                 .
               end
             ' dify.json > review_raw.json
+          fi
+
+          # --- ここから堅牢化（JSONでなければ生テキスト貼りに備えてラップ） ---
+          # 1) review_raw.json が「JSONとして妥当か」を確認
+          if jq -e . review_raw.json >/dev/null 2>&1; then
+            # 1-1) JSONではあるが "文字列" だけのときは、JSONとして再パースを試みる
+            if jq -e 'type=="string"' review_raw.json >/dev/null 2>&1; then
+              # 文字列がさらにJSON文字列ならデコード、ダメなら {raw: "..."} に包む
+              if jq -e 'fromjson | . as $x | ($x|type=="object" or $x|type=="array")' review_raw.json >/dev/null 2>&1; then
+                jq -r 'fromjson' review_raw.json > _tmp.json && mv _tmp.json review_raw.json
+              else
+                jq -r '{raw: .}' review_raw.json > _tmp.json && mv _tmp.json review_raw.json
+              fi
+            fi
+          else
+            # 2) そもそもJSONではない（プレーン文字列など）→ {raw: "..."} で包む
+            jq -R -s '{raw: .}' review_raw.json > _tmp.json && mv _tmp.json review_raw.json
           fi
 
 
