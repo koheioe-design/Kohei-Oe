@@ -6,6 +6,11 @@ on:
   # 手動テストしたい場合は下を有効化
   # workflow_dispatch: {}
 
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write   # コメント投稿で issues API を使うため
+
 jobs:
   review:
     runs-on: ubuntu-latest
@@ -22,12 +27,14 @@ jobs:
       - name: Collect ABAP diff
         shell: bash
         run: |
-          git fetch origin ${{ github.base_ref }} --depth=1
-          git diff --unified=0 origin/${{ github.base_ref }}...HEAD \
+          # base も履歴を十分取っておく（merge-base計算の安定化）
+          git fetch origin "${{ github.base_ref }}" --depth=50
+          git diff --unified=0 "origin/${{ github.base_ref }}...HEAD" \
             -- '*.abap' '*.prog.abap' '*.clas.abap' '*.intf.abap' '*.incl.abap' > diff.patch || true
-          # LLM入力量の上限対策（必要に応じて調整）
           head -c 90000 diff.patch > diff.trunc.patch || true
           wc -c diff.trunc.patch || true
+
+
 
       # --- 差分が無ければスキップ ---
       - name: Skip if no diff
@@ -48,38 +55,52 @@ jobs:
         run: |
           REPO="${{ github.repository }}"
           NUM="${{ github.event.number }}"
-          PR=$(gh api repos/$REPO/pulls/$NUM)
-          FILES_JSON=$(gh api repos/$REPO/pulls/$NUM/files -q '.[] | {filename, status}' | jq -c -s .)
+          PR=$(gh api "repos/$REPO/pulls/$NUM")
+          FILES_JSON=$(gh api "repos/$REPO/pulls/$NUM/files" -q '.[] | {filename, status}' | jq -c -s .)
+      
+          {
+            echo "title<<__EOF__"
+            echo "$PR" | jq -r '.title'
+            echo "__EOF__"
+            echo "body<<__EOF__"
+            # \r 除去＋そのまま複数行で安全に出力
+            echo "$PR" | jq -r '.body // ""' | tr -d '\r'
+            echo "__EOF__"
+            echo "author<<__EOF__"
+            echo "$PR" | jq -r '.user.login'
+            echo "__EOF__"
+            echo "changed_files<<__EOF__"
+            echo "$FILES_JSON"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
 
-          echo "title=$(echo "$PR" | jq -r '.title')" >> $GITHUB_OUTPUT
-          echo "body=$(echo "$PR" | jq -r '.body // ""' | tr -d '\r')" >> $GITHUB_OUTPUT
-          echo "author=$(echo "$PR" | jq -r '.user.login')" >> $GITHUB_OUTPUT
-          # 文字列として渡したいので JSON をそのまま文字列で保持
-          echo "changed_files=$FILES_JSON" >> $GITHUB_OUTPUT
-
+  
       # --- Dify Workflow 実行 ---
       - name: Call Dify Workflow
         if: steps.guard.outputs.skip != 'true'
         id: dify
         env:
-          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}           # Workflowアプリの Server-side API Key
-          DIFY_API_BASE: ${{ secrets.DIFY_API_BASE }}         # 例: https://dify-novagrid.com/v1
-          DIFY_WORKFLOW_ID: ${{ secrets.DIFY_WORKFLOW_ID }}   # 例: uNCqCaZfykMRl1r6
+          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}         # Workflow用 Server-side API Key
+          DIFY_API_BASE: ${{ secrets.DIFY_API_BASE }}       # 例: https://dify-novagrid.com でも可
+          DIFY_WORKFLOW_ID: ${{ secrets.DIFY_WORKFLOW_ID }} # 例: uNCqCaZfykMRl1r6
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -y && sudo apt-get install -y jq
-
-          # --- 事前チェック＆URL整形 ---
+      
           if [ -z "${DIFY_WORKFLOW_ID:-}" ]; then
             echo "ERROR: DIFY_WORKFLOW_ID is empty. Set repository secret."
             exit 1
           fi
-          API_BASE="${DIFY_API_BASE%/}"             # 末尾 / を除去
-          URL="$API_BASE/workflows/run"             # ← /{id}/run ではなく /workflows/run
+      
+          # --- BASE URL 正規化：末尾スラッシュ削除 + /v1 付与 ---
+          _base="${DIFY_API_BASE%/}"
+          if ! echo "$_base" | grep -q '/v1$'; then
+            _base="$_base/v1"
+          fi
+          URL="$_base/workflows/run"
           echo "Call URL: $URL"
-
-          # --- リクエストBODY作成（workflow_id をボディに入れる） ---
+      
           BODY=$(jq -n \
             --arg wid  "${DIFY_WORKFLOW_ID}" \
             --arg diff "$(cat diff.trunc.patch)" \
@@ -99,36 +120,45 @@ jobs:
                  author: $author,
                  title: $title,
                  body: $body,
-                 changed_files: $changed_files   # 文字列として送る
+                 changed_files: $changed_files
                },
                response_mode: "blocking",
                user: $user
              }')
-
-          # --- 呼び出し（リダイレクト/失敗検知つき） ---
-          RESP=$(curl -sS -fSL -w "\n%{http_code}" \
+      
+          # -f を付けない。本文とHTTPコードを両取りして自前で判定
+          RESP=$(curl -sS -L -w "\n%{http_code}" \
             -H "Authorization: Bearer $DIFY_API_KEY" \
             -H "Content-Type: application/json" \
             -d "$BODY" \
-            "$URL" )
-
+            "$URL" || true)
+      
           HTTP_CODE=$(echo "$RESP" | tail -n1)
           JSON=$(echo "$RESP" | sed '$d')
           echo "HTTP_CODE=$HTTP_CODE"
           echo "$JSON" > dify.json
-
+      
           echo "==== DIFY RAW ===="
-          cat dify.json
+          cat dify.json || true
           echo "=================="
-
-          # LLM 出力をファイル化（review or text）
-          jq -r '.data.outputs.review // .data.outputs.text // empty' dify.json > review.md
-          if [ ! -s review.md ]; then
-            echo "(empty)" > review.md
+      
+          # 2xx 以外はログを出しつつ review.md を生成して後段で読めるようにする
+          if ! echo "$HTTP_CODE" | grep -qE '^2'; then
+            echo "(Dify error; HTTP_CODE=$HTTP_CODE)" > review.md
             cat dify.json >> review.md
+          else
+            jq -r '.data.outputs.review // .data.outputs.text // empty' dify.json > review.md
+            if [ ! -s review.md ]; then
+              echo "(empty)" > review.md
+              cat dify.json >> review.md
+            fi
           fi
 
-      # --- PRにコメント投稿 ---
+     
+     
+
+
+      # …
       - name: Post PR comment
         if: steps.guard.outputs.skip != 'true'
         env:
@@ -138,10 +168,10 @@ jobs:
           {
             echo "### 🤖 Dify 規約レビュー"
             echo
-            echo '```json'
+            echo '```'
             cat review.md
             echo '```'
           } > comment.md
-
-          gh api repos/${{ github.repository }}/issues/${{ github.event.number }}/comments \
+      
+          gh api "repos/${{ github.repository }}/issues/${{ github.event.number }}/comments" \
             -f body="$(cat comment.md)"
