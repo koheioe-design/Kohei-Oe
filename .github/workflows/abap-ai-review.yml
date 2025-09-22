@@ -215,17 +215,38 @@ jobs:
 
 
        # --- 違反があれば CI を fail にする ---
-      - name: Fail if block violations exist
+       
+      - name: Fail if block violations exist (with details)
         if: steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          # violations のうち severity=block を数える
-          BLOCK_COUNT=$(jq '[.violations[]? | select(.severity=="block")] | length' review_raw.json || echo 0)
+          # block違反を抽出
+          jq '[.violations[]? | select(.severity=="block")]' review_raw.json > _blocks.json
+          BLOCK_COUNT=$(jq 'length' _blocks.json)
+      
+          # Job Summary に表で出す（ActionsのRunページ上にタブ表示）
+          {
+            echo "### ❌ Block violations ($BLOCK_COUNT)"
+            if [ "$BLOCK_COUNT" -gt 0 ]; then
+              echo
+              echo "| ルールID | 場所 | 内容 |"
+              echo "|---|---|---|"
+              jq -r '.[] | "| \(.rule_id) | \(.location // "-") | \(.message // "-") |"' _blocks.json
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      
+          # コンソールにも出す
+          cat "$GITHUB_STEP_SUMMARY"
+      
+          # 件数で失敗
           if [ "$BLOCK_COUNT" -gt 0 ]; then
             echo "❌ Block violations detected: $BLOCK_COUNT"
             exit 1
           fi
+
 
 
 
