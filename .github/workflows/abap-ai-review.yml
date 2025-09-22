@@ -286,18 +286,6 @@ jobs:
           fi
 
 
-                + ( $viol[] | "| " + (.rule_id|tostring) + " | " + sev(.severity) + " | " + (.location // "-") + " | " + (.message // "-") + " |" )
-              else "_No violations_\n" end )
-            + "\n\n#### 🛠 改善提案 (Improvements)\n"
-            + ( if ($impr|length) > 0 then
-                  ( $impr[] | "**" + (.title // "Suggestion") + "**\n説明: " + (.explanation // "-") + "\n```abap\n" + (.code // "") + "\n```\n" )
-              else "_No suggestions_\n" end )
-
-            + "\n#### 📝 備考\n"
-            + ( if ($notes|length) > 0 then ($notes | map("- " + .) | join("\n")) else "_No notes_" end )
-          ' review_raw.json > review.md
-
-
       # --- PRにコメント投稿 ---
       - name: Post PR comment
         if: steps.guard.outputs.skip != 'true'
