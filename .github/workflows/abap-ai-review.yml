@@ -302,10 +302,33 @@ jobs:
               end
           ' review_raw.json > review.md
 
-       # --- 違反があれば CI を fail にする ---
-       
+      # --- (任意) Block違反を一覧して即Failさせたい場合の安全版 ---
       - name: Fail if block violations exist (with details)
         if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # review_raw.json から block のみ抽出（無ければ空配列）
+          jq '[.violations[]? | select(.severity=="block")]' review_raw.json > _blocks.json 2>/dev/null || echo "[]" > _blocks.json
+          BLOCK_COUNT=$(jq 'length' _blocks.json)
+
+          # Job Summary に表を出す
+          {
+            echo "### ❌ Block violations ($BLOCK_COUNT)"
+            if [ "$BLOCK_COUNT" -gt 0 ]; then
+              echo
+              echo "| ルールID | 場所 | 内容 |"
+              echo "|---|---|---|"
+              jq -r '.[] | "| \(.rule_id) | \(.location // "-") | \(.message // "-") |"' _blocks.json
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # 件数で失敗
+          if [ "$BLOCK_COUNT" -gt 0 ]; then
+            echo "❌ Block violations detected: $BLOCK_COUNT"
+            exit 1
+          fi
+
 
                 + ( $viol[] | "| " + (.rule_id|tostring) + " | " + sev(.severity) + " | " + (.location // "-") + " | " + (.message // "-") + " |" )
               else "_No violations_\n" end )
@@ -317,6 +340,7 @@ jobs:
             + "\n#### 📝 備考\n"
             + ( if ($notes|length) > 0 then ($notes | map("- " + .) | join("\n")) else "_No notes_" end )
           ' review_raw.json > review.md
+
 
       # --- PRにコメント投稿 ---
       - name: Post PR comment
