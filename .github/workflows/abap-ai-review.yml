@@ -188,80 +188,80 @@ jobs:
           fi
 
 
-          - name: Format Dify output to Markdown
-          if: steps.guard.outputs.skip != 'true'
-          shell: bash
-          run: |
-            set -euo pipefail
+      - name: Format Dify output to Markdown
+        if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
   
-            # jqフィルタをファイルに書き出す（ヒアドキュメントは必ず ' 付きでクォート）
-            cat > _format.jq <<'JQ'
-            # --- JSONオブジェクト化ユーティリティ ---
-            def ensure_obj($x):
-              if ($x|type)=="object" then $x
-              elif ($x|type)=="string" then (try ($x|fromjson) catch {"raw":$x})
-              else {"raw":($x|tostring)}
-              end;
+          # jqフィルタをファイルに書き出す（ヒアドキュメントは必ず ' 付きでクォート）
+          cat > _format.jq <<'JQ'
+          # --- JSONオブジェクト化ユーティリティ ---
+          def ensure_obj($x):
+            if ($x|type)=="object" then $x
+            elif ($x|type)=="string" then (try ($x|fromjson) catch {"raw":$x})
+            else {"raw":($x|tostring)}
+            end;
   
-            # --- 重大度を絵文字に変換 ---
-            def sev($s):
-              if   $s=="block" then "❌ block"
-              elif $s=="warn"  then "⚠️ warn"
-              else ($s // "info")
-              end;
+          # --- 重大度を絵文字に変換 ---
+          def sev($s):
+            if   $s=="block" then "❌ block"
+            elif $s=="warn"  then "⚠️ warn"
+            else ($s // "info")
+            end;
   
-            . as $txt
-            | (ensure_obj($txt)) as $r
-            | ($r.violations   // []) as $v_raw
-            | ($r.improvements // []) as $i_raw
-            | ($r.notes        // []) as $n_raw
-            | ($r.raw          // null) as $raw_only
+          . as $txt
+          | (ensure_obj($txt)) as $r
+          | ($r.violations   // []) as $v_raw
+          | ($r.improvements // []) as $i_raw
+          | ($r.notes        // []) as $n_raw
+          | ($r.raw          // null) as $raw_only
   
-            | ($v_raw | if type=="array" then unique_by(.rule_id) else [] end) as $viol
-            | ($i_raw | if type=="array" then unique_by([.title,.code]) else [] end) as $impr
-            | ($n_raw | if type=="array" then unique else [] end) as $notes
+          | ($v_raw | if type=="array" then unique_by(.rule_id) else [] end) as $viol
+          | ($i_raw | if type=="array" then unique_by([.title,.code]) else [] end) as $impr
+          | ($n_raw | if type=="array" then unique else [] end) as $notes
   
-            | if (((($viol|length)+($impr|length)+($notes|length))==0) and ($raw_only != null)) then
-                # --- raw（生テキスト）をそのままMarkdownとして整える ---
-                ( $raw_only | (try fromjson catch .) )
-                | gsub("\r"; "")
-                | gsub("\nabap\nabap\n"; "\n```abap\n")
-                | gsub("\nabap\n"; "\n```abap\n")
-                | gsub("\n\n\n"; "\n```\n\n")
-                | ( if test("(?s).*```abap(?!.*```)$") then . + "\n```\n" else . end )
-              else
-                # --- 構造化オブジェクトからMarkdownを生成 ---
-                "### 🤖 Dify ABAP レビュー結果\n"
-                + "\n#### 🚨 違反 (Violations)\n"
-                + ( if (($viol | length) > 0) then
-                      "| ルールID | 重大度 | 場所 | 内容 |\n"
-                      + "|----------|--------|------|------|\n"
-                      + ( [ $viol[]
-                          | "| " + (.rule_id|tostring) + " | "
-                          + sev(.severity) + " | "
-                          + (.location // "-") + " | "
-                          + (.message  // "-") + " |"
-                        ] | join("\n") )
-                    else "_No violations_" end )
-                + "\n\n#### 🛠 改善提案 (Improvements)\n"
-                + ( if (($impr | length) > 0) then
-                      ( [ $impr[]
-                          | "**" + (.title // "Suggestion") + "**\n"
-                          + "説明: " + (.explanation // "-") + "\n"
-                          + (.code // "")
-                          + "\n"
-                        ] | join("\n") )
-                    else "_No suggestions_" end )
-                + "\n\n#### 📝 備考\n"
-                + ( if (($notes | length) > 0)
-                    then ($notes | map("- " + .) | join("\n"))
-                    else "_No notes_"
-                  end )
-              end
-            JQ
+          | if (((($viol|length)+($impr|length)+($notes|length))==0) and ($raw_only != null)) then
+              # --- raw（生テキスト）をそのままMarkdownとして整える ---
+              ( $raw_only | (try fromjson catch .) )
+              | gsub("\r"; "")
+              | gsub("\nabap\nabap\n"; "\n```abap\n")
+              | gsub("\nabap\n"; "\n```abap\n")
+              | gsub("\n\n\n"; "\n```\n\n")
+              | ( if test("(?s).*```abap(?!.*```)$") then . + "\n```\n" else . end )
+            else
+              # --- 構造化オブジェクトからMarkdownを生成 ---
+              "### 🤖 Dify ABAP レビュー結果\n"
+              + "\n#### 🚨 違反 (Violations)\n"
+              + ( if (($viol | length) > 0) then
+                    "| ルールID | 重大度 | 場所 | 内容 |\n"
+                    + "|----------|--------|------|------|\n"
+                    + ( [ $viol[]
+                        | "| " + (.rule_id|tostring) + " | "
+                        + sev(.severity) + " | "
+                        + (.location // "-") + " | "
+                        + (.message  // "-") + " |"
+                      ] | join("\n") )
+                  else "_No violations_" end )
+              + "\n\n#### 🛠 改善提案 (Improvements)\n"
+              + ( if (($impr | length) > 0) then
+                    ( [ $impr[]
+                        | "**" + (.title // "Suggestion") + "**\n"
+                        + "説明: " + (.explanation // "-") + "\n"
+                        + (.code // "")
+                        + "\n"
+                      ] | join("\n") )
+                  else "_No suggestions_" end )
+              + "\n\n#### 📝 備考\n"
+              + ( if (($notes | length) > 0)
+                  then ($notes | map("- " + .) | join("\n"))
+                  else "_No notes_"
+                end )
+            end
+          JQ
   
-            # review_raw.json は JSONでも生テキストでもOK。-R -s で常にテキストとして読み込み → jq 側で判定
-            jq -R -s -f _format.jq review_raw.json > review.md
+          # review_raw.json は JSONでも生テキストでもOK。-R -s で常にテキストとして読み込み → jq 側で判定
+          jq -R -s -f _format.jq review_raw.json > review.md
 
 
 
