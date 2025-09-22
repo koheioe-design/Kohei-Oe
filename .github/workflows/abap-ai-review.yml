@@ -150,7 +150,7 @@ jobs:
 
           # 2xx 判定はそのまま取り出し、非2xxはエラーメッセージを格納
 
-          if ! echo "$HTTP_CODE" | grep -qE '^2'; then
+          if ! echo "$HTTP_CODE" | grep -qE '^2[0-9][0-9]$'; then
             echo "(Dify error; HTTP_CODE=$HTTP_CODE)" > review_raw.json
             cat dify.json >> review_raw.json
           else
