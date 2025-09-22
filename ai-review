@@ -103,17 +103,19 @@ jobs:
           # 必要ならログで確認
           jq -r '.' dify.json || true
 
+  　　　　 # デバッグ用にレスポンスを丸ごと表示
+          echo "==== DIFY RAW ===="
+          cat dify.json
+          echo "=================="
+
+
           # 応答の取り出し（キー名の揺れに広く対応）
           echo "RAW=$(jq -r '
-            .data.outputs.result
-            // .data.outputs.review
-            // .data.outputs.output
-            // .data.outputs.text
-            // .data.result
-            // .result
-            // .message
-            // {}
+            .data.outputs.review           # ← 終了ノード review
+            // .data.outputs.text          # 予備（reviewでなくtextの時）
+            // ""
           ' dify.json | base64 -w0)" >> $GITHUB_OUTPUT
+
 
       # --- PRにコメント投稿 ---
       - name: Post PR comment
@@ -125,7 +127,7 @@ jobs:
           {
             echo "### 🤖 Dify 規約レビュー"
             echo
-            echo "\`\`\`"
+            echo '```json'
             echo "$REVIEW"
             echo "\`\`\`"
           } > review.md
