@@ -160,19 +160,22 @@ jobs:
 
 
       # …
-      - name: Post PR comment
+      - name: Format Dify output to Markdown
         if: steps.guard.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
         run: |
-          {
-            echo "### 🤖 Dify 規約レビュー"
-            echo
-            echo '```'
-            cat review.md
-            echo '```'
-          } > comment.md
-      
-          gh api "repos/${{ github.repository }}/issues/${{ github.event.number }}/comments" \
-            -f body="$(cat comment.md)"
+          set -euo pipefail
+          jq -r '
+            "### 🤖 Dify ABAP レビュー結果\n" +
+            "\n#### 🚨 違反 (Violations)\n" +
+            "| ルールID | 重大度 | 場所 | 内容 |\n" +
+            "|----------|--------|------|------|\n" +
+            (.violations[]? | "| \(.rule_id) | " +
+              (if .severity=="block" then "❌ block" else "⚠️ warn" end) + " | " +
+              .location + " | " + .message + " |") +
+            "\n\n#### 🛠 改善提案 (Improvements)\n" +
+            ( .improvements[]? |
+              "**\(.title)**\n説明: \(.explanation)\n```abap\n\(.code)\n```\n"
+            ) +
+            "\n#### 📝 備考\n- " +
+            (.notes[]?)
+          ' dify.json > review.md
