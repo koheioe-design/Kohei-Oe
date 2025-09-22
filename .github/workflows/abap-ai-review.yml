@@ -1,48 +1,42 @@
+# temporary commit for rerun
+# temporary commit for rerun
 name: ABAP AI Review
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  # workflow_dispatch: {}  # 手動実行したい場合は有効化
+  # 手動テストしたい場合は下を有効化
+  # workflow_dispatch: {}
 
 permissions:
   contents: read
   pull-requests: write
-  issues: write   # コメント投稿に使用
-
-env:
-  # ポリシーの厳しさ: block / warn / off
-  ENFORCE_LEVEL: block
-  # コミットメッセージにこの語があれば失敗をスキップ
-  OVERRIDE_COMMIT_KEYWORD: "[abap-override]"
-  # PRにこのラベルが付いていれば失敗をスキップ
-  OVERRIDE_LABEL: "abap-override"
-
+  issues: write   # コメント投稿で issues API を使うため
 
 jobs:
   review:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup jq & gh
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq
-
       # --- ABAP差分の収集（ABAP拡張子に限定） ---
       - name: Collect ABAP diff
         shell: bash
         run: |
-          set -euo pipefail
+          # base も履歴を十分取っておく（merge-base計算の安定化）
           git fetch origin "${{ github.base_ref }}" --depth=50
           git diff --unified=0 "origin/${{ github.base_ref }}...HEAD" \
             -- '*.abap' '*.prog.abap' '*.clas.abap' '*.intf.abap' '*.incl.abap' > diff.patch || true
           head -c 90000 diff.patch > diff.trunc.patch || true
           wc -c diff.trunc.patch || true
+
+
 
       # --- 差分が無ければスキップ ---
       - name: Skip if no diff
@@ -51,28 +45,27 @@ jobs:
         run: |
           if [ ! -s diff.trunc.patch ]; then
             echo "No ABAP diff. Skipping review."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> $GITHUB_OUTPUT
           fi
 
-      # --- PRメタ情報の収集 ---
+      # --- PRメタ情報の収集（author/title/body/changed_files） ---
       - name: Collect PR metadata
         if: steps.guard.outputs.skip != 'true'
         id: meta
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
         run: |
-          set -euo pipefail
           REPO="${{ github.repository }}"
           NUM="${{ github.event.number }}"
           PR=$(gh api "repos/$REPO/pulls/$NUM")
           FILES_JSON=$(gh api "repos/$REPO/pulls/$NUM/files" -q '.[] | {filename, status}' | jq -c -s .)
-
+      
           {
             echo "title<<__EOF__"
             echo "$PR" | jq -r '.title'
             echo "__EOF__"
             echo "body<<__EOF__"
+            # \r 除去＋そのまま複数行で安全に出力
             echo "$PR" | jq -r '.body // ""' | tr -d '\r'
             echo "__EOF__"
             echo "author<<__EOF__"
@@ -83,43 +76,42 @@ jobs:
             echo "__EOF__"
           } >> "$GITHUB_OUTPUT"
 
+  
       # --- Dify Workflow 実行 ---
       - name: Call Dify Workflow
         if: steps.guard.outputs.skip != 'true'
         id: dify
         env:
-          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}         # Dify Workflow用 Server-side API Key
-          DIFY_API_BASE: ${{ secrets.DIFY_API_BASE }}       # 例: https://dify-novagrid.com or https://dify-novagrid.com/v1
+          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}         # Workflow用 Server-side API Key
+          DIFY_API_BASE: ${{ secrets.DIFY_API_BASE }}       # 例: https://dify-novagrid.com でも可
           DIFY_WORKFLOW_ID: ${{ secrets.DIFY_WORKFLOW_ID }} # 例: uNCqCaZfykMRl1r6
         shell: bash
         run: |
           set -euo pipefail
-
           sudo apt-get update -y && sudo apt-get install -y jq
-
-
-          [ -n "${DIFY_WORKFLOW_ID:-}" ] || { echo "ERROR: DIFY_WORKFLOW_ID is empty."; exit 1; }
-
-          # /v1 を補完
+      
+          if [ -z "${DIFY_WORKFLOW_ID:-}" ]; then
+            echo "ERROR: DIFY_WORKFLOW_ID is empty. Set repository secret."
+            exit 1
+          fi
+      
+          # --- BASE URL 正規化：末尾スラッシュ削除 + /v1 付与 ---
           _base="${DIFY_API_BASE%/}"
           if ! echo "$_base" | grep -q '/v1$'; then
             _base="$_base/v1"
           fi
           URL="$_base/workflows/run"
           echo "Call URL: $URL"
-
-
-          # changed_files は“文字列”で渡す（Dify側：段落 32768）
-
+      
           BODY=$(jq -n \
-            --arg wid   "${DIFY_WORKFLOW_ID}" \
-            --arg diff  "$(cat diff.trunc.patch)" \
-            --arg repo  "${{ github.repository }}" \
-            --arg pr    "${{ github.event.number }}" \
-            --arg user  "${{ github.actor }}" \
+            --arg wid  "${DIFY_WORKFLOW_ID}" \
+            --arg diff "$(cat diff.trunc.patch)" \
+            --arg repo "${{ github.repository }}" \
+            --arg pr   "${{ github.event.number }}" \
+            --arg user "${{ github.actor }}" \
             --arg author "${{ steps.meta.outputs.author }}" \
             --arg title  "${{ steps.meta.outputs.title }}" \
-            --arg bodytxt "${{ steps.meta.outputs.body }}" \
+            --arg body   "${{ steps.meta.outputs.body }}" \
             --arg changed_files "${{ steps.meta.outputs.changed_files }}" \
             '{
                workflow_id: $wid,
@@ -129,261 +121,62 @@ jobs:
                  pr_number: ($pr|tonumber),
                  author: $author,
                  title: $title,
-                 body: $bodytxt,
+                 body: $body,
                  changed_files: $changed_files
                },
                response_mode: "blocking",
                user: $user
              }')
-
-
-          # 本文とHTTPコードを両取りして自前判定
-
+      
+          # -f を付けない。本文とHTTPコードを両取りして自前で判定
           RESP=$(curl -sS -L -w "\n%{http_code}" \
             -H "Authorization: Bearer $DIFY_API_KEY" \
             -H "Content-Type: application/json" \
             -d "$BODY" \
             "$URL" || true)
-
+      
           HTTP_CODE=$(echo "$RESP" | tail -n1)
           JSON=$(echo "$RESP" | sed '$d')
           echo "HTTP_CODE=$HTTP_CODE"
           echo "$JSON" > dify.json
-
-
-          # 2xx 判定はそのまま
-
+      
+          echo "==== DIFY RAW ===="
+          cat dify.json || true
+          echo "=================="
+      
+          # 2xx 以外はログを出しつつ review.md を生成して後段で読めるようにする
           if ! echo "$HTTP_CODE" | grep -qE '^2'; then
-            echo "(Dify error; HTTP_CODE=$HTTP_CODE)" > review_raw.json
-            cat dify.json >> review_raw.json
+            echo "(Dify error; HTTP_CODE=$HTTP_CODE)" > review.md
+            cat dify.json >> review.md
           else
-
-            # outputs.review があれば最優先で取り出し。なければ outputs 全体 or dify.json
-
-            # outputs.review > review 文字列 > outputs全体 の順で取り出す
-            jq -r '
-              if .data? and .data.outputs? and (.data.outputs.review? // empty) then
-                .data.outputs.review
-              elif .review? then
-                .review
-              elif .data? and .data.outputs? then
-                .data.outputs
-              else
-                .
-              end
-            ' dify.json > review_raw.json
+            jq -r '.data.outputs.review // .data.outputs.text // empty' dify.json > review.md
+            if [ ! -s review.md ]; then
+              echo "(empty)" > review.md
+              cat dify.json >> review.md
+            fi
           fi
 
+     
+     
 
-      # --- 整形して Markdown を作る（重複排除） ---
+
+      # …
       - name: Format Dify output to Markdown
         if: steps.guard.outputs.skip != 'true'
-        shell: bash
         run: |
           set -euo pipefail
           jq -r '
-
-            # 受け取った値をオブジェクト化（文字列JSONにも対応）
-            def ensure_obj($x):
-              if $x|type == "object" then $x
-              elif $x|type == "string" then (try ($x|fromjson) catch {"raw":$x})
-              else {"raw":($x|tostring)}
-              end;
-      
-            # 表示用整形
-            def sev($s): if $s=="block" then "❌ block"
-                         elif $s=="warn" then "⚠️ warn"
-                         else $s // "info" end;
-
-            def ensure_obj($x):
-              if $x|type == "object" then $x
-              elif $x|type == "string" then (try ($x|fromjson) catch {"raw":$x})
-              else {"raw":($x|tostring)} end;
-            def sev($s): if $s=="block" then "❌ block" elif $s=="warn" then "⚠️ warn" else ($s // "info") end;
-
-
-            . as $raw
-            | (ensure_obj($raw)) as $r
-            | ($r.violations // []) as $v_raw
-            | ($r.improvements // []) as $i_raw
-            | ($r.notes // []) as $n_raw
-
-            # --- 重複排除 ---
-            | ($v_raw | unique_by(.rule_id)) as $viol
-            | ($i_raw | unique_by([.title, .code])) as $impr
-            | ($n_raw | unique) as $notes
-      
-            # --- 実際の描画 ---
-
-            | ($v_raw | unique_by(.rule_id)) as $viol
-            | ($i_raw | unique_by([.title, .code])) as $impr
-            | ($n_raw | unique) as $notes
-
-
-            | "### 🤖 Dify ABAP レビュー結果\n"
-            + "\n#### 🚨 違反 (Violations)\n"
-            + ( if ($viol|length) > 0 then
-                  "| ルールID | 重大度 | 場所 | 内容 |\n"
-                + "|----------|--------|------|------|\n"
-
-                + ( $viol[]
-                    | "| " + (.rule_id|tostring) + " | "
-                    + sev(.severity) + " | "
-                    + (.location // "-") + " | "
-                    + (.message // "-") + " |"
-                  )
-                else
-                  "_No violations_\n"
-              end
-              )
-            + "\n\n#### 🛠 改善提案 (Improvements)\n"
-            + ( if ($impr|length) > 0 then
-                  ( $impr[]
-                    | "**" + (.title // "Suggestion") + "**\n"
-                    + "説明: " + (.explanation // "-") + "\n"
-                    + "```abap\n" + (.code // "") + "\n```\n"
-                  )
-                else
-                  "_No suggestions_\n"
-              end
-              )
-            + "\n#### 📝 備考\n"
-            + ( if ($notes|length) > 0
-                then ($notes | map("- " + .) | join("\n"))
-                else "_No notes_"
-              end
-              )
-          ' review_raw.json > review.md
-
-
-       # --- 違反があれば CI を fail にする ---
-       
-      - name: Fail if block violations exist (with details)
-        if: steps.guard.outputs.skip != 'true'
-
-                + ( $viol[] | "| " + (.rule_id|tostring) + " | " + sev(.severity) + " | " + (.location // "-") + " | " + (.message // "-") + " |" )
-              else "_No violations_\n" end )
-            + "\n\n#### 🛠 改善提案 (Improvements)\n"
-            + ( if ($impr|length) > 0 then
-                  ( $impr[] | "**" + (.title // "Suggestion") + "**\n説明: " + (.explanation // "-") + "\n```abap\n" + (.code // "") + "\n```\n" )
-              else "_No suggestions_\n" end )
-            + "\n#### 📝 備考\n"
-            + ( if ($notes|length) > 0 then ($notes | map("- " + .) | join("\n")) else "_No notes_" end )
-          ' review_raw.json > review.md
-
-      # --- PRにコメント投稿 ---
-      - name: Post PR comment
-        if: steps.guard.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh api "repos/${{ github.repository }}/issues/${{ github.event.number }}/comments" \
-            -f body="$(cat review.md)"
-
-      # --- オーバーライド判定（ラベル/コミット） ---
-      - name: Check override (label / commit keyword)
-        if: steps.guard.outputs.skip != 'true'
-        id: override
-
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # block違反を抽出
-          jq '[.violations[]? | select(.severity=="block")]' review_raw.json > _blocks.json
-          BLOCK_COUNT=$(jq 'length' _blocks.json)
-      
-          # Job Summary に表で出す（ActionsのRunページ上にタブ表示）
-          {
-            echo "### ❌ Block violations ($BLOCK_COUNT)"
-            if [ "$BLOCK_COUNT" -gt 0 ]; then
-              echo
-              echo "| ルールID | 場所 | 内容 |"
-              echo "|---|---|---|"
-              jq -r '.[] | "| \(.rule_id) | \(.location // "-") | \(.message // "-") |"' _blocks.json
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-      
-          # コンソールにも出す
-          cat "$GITHUB_STEP_SUMMARY"
-      
-          # 件数で失敗
-          if [ "$BLOCK_COUNT" -gt 0 ]; then
-            echo "❌ Block violations detected: $BLOCK_COUNT"
-            exit 1
-
-          N="${{ github.event.number }}"
-          SKIP=false
-          # ラベル
-          if gh pr view "$N" --json labels -q '.labels[].name' | grep -qx "${OVERRIDE_LABEL}"; then
-            echo "Override by label: ${OVERRIDE_LABEL}"
-            SKIP=true
-          fi
-          # コミットメッセージのキーワード（直近コミット）
-          if git log -1 --pretty=%B | grep -q "${OVERRIDE_COMMIT_KEYWORD}"; then
-            echo "Override by commit keyword: ${OVERRIDE_COMMIT_KEYWORD}"
-            SKIP=true
-
-          fi
-          echo "skip_fail=${SKIP}" >> "$GITHUB_OUTPUT"
-
-      # --- Job SummaryにBlock違反の詳細を出す & CI制御 ---
-      - name: Enforce policy level (fail if violations)
-        if: steps.guard.outputs.skip != 'true' && steps.override.outputs.skip_fail != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # violations抽出（なければ空配列）
-          echo "${{ toJson(steps.dify.outputs) }}" > /dev/null || true  # no-op to keep context
-          jq '(.violations // [])' review_raw.json > _viol.json 2>/dev/null || echo "[]" > _viol.json
-
-          level="${ENFORCE_LEVEL:-block}"
-          case "$level" in
-            off)
-              echo "Policy=off → do not fail."
-              exit 0
-              ;;
-            warn)
-              FILTER='.[] | select(.severity=="warn" or .severity=="block")'
-              ;;
-            block|*)
-              FILTER='.[] | select(.severity=="block")'
-              ;;
-          esac
-
-          jq "[ ${FILTER} ]" _viol.json > _sel.json
-          COUNT=$(jq 'length' _sel.json)
-
-          {
-            echo "### Policy enforcement ($level) — selected violations: $COUNT"
-            if [ "$COUNT" -gt 0 ]; then
-              echo
-              echo "| ルールID | 重大度 | 場所 | 内容 |"
-              echo "|---|---|---|"
-              jq -r '.[] | "| \(.rule_id) | \(.severity) | \(.location // "-") | \(.message // "-") |"' _sel.json
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-          cat "$GITHUB_STEP_SUMMARY"
-
-
-
-      # --- PRにコメント投稿 ---
-      - name: Post PR comment
-        if: steps.guard.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh api "repos/${{ github.repository }}/issues/${{ github.event.number }}/comments" \
-            -f body="$(cat review.md)"
-
-          if [ "$COUNT" -gt 0 ]; then
-            echo "❌ Violations detected under policy=$level: $COUNT"
-            exit 1
-          fi
-
+            "### 🤖 Dify ABAP レビュー結果\n" +
+            "\n#### 🚨 違反 (Violations)\n" +
+            "| ルールID | 重大度 | 場所 | 内容 |\n" +
+            "|----------|--------|------|------|\n" +
+            (.violations[]? | "| \(.rule_id) | " +
+              (if .severity=="block" then "❌ block" else "⚠️ warn" end) + " | " +
+              .location + " | " + .message + " |") +
+            "\n\n#### 🛠 改善提案 (Improvements)\n" +
+            ( .improvements[]? |
+              "**\(.title)**\n説明: \(.explanation)\n```abap\n\(.code)\n```\n"
+            ) +
+            "\n#### 📝 備考\n- " +
+            (.notes[]?)
+          ' dify.json > review.md
