@@ -1,29 +1,35 @@
 name: ABAP AI Review
+
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  # 手動テストしたい場合は下を有効化
+  # workflow_dispatch: {}
 
 jobs:
   review:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write   # PRコメント投稿に必要
+      pull-requests: write
+
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # --- ABAP差分の収集（ABAP拡張子に限定） ---
       - name: Collect ABAP diff
         shell: bash
         run: |
           git fetch origin ${{ github.base_ref }} --depth=1
-          # ABAP拡張子のみ（必要に応じて追加）
           git diff --unified=0 origin/${{ github.base_ref }}...HEAD \
             -- '*.abap' '*.prog.abap' '*.clas.abap' '*.intf.abap' '*.incl.abap' > diff.patch || true
-          # LLM上限対策でサイズ制限（必要に応じて調整）
+          # LLM入力量の上限対策（必要に応じて調整）
           head -c 90000 diff.patch > diff.trunc.patch || true
+          wc -c diff.trunc.patch || true
 
+      # --- 差分が無ければスキップ ---
       - name: Skip if no diff
         id: guard
         shell: bash
@@ -33,43 +39,96 @@ jobs:
             echo "skip=true" >> $GITHUB_OUTPUT
           fi
 
+      # --- PRメタ情報の収集（author/title/body/changed_files） ---
+      - name: Collect PR metadata
+        if: steps.guard.outputs.skip != 'true'
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          NUM="${{ github.event.number }}"
+          PR=$(gh api repos/$REPO/pulls/$NUM)
+          FILES_JSON=$(gh api repos/$REPO/pulls/$NUM/files -q '.[] | {filename, status}' | jq -c -s .)
+
+          echo "title=$(echo "$PR" | jq -r '.title')" >> $GITHUB_OUTPUT
+          echo "body=$(echo "$PR" | jq -r '.body // ""' | tr -d '\r')" >> $GITHUB_OUTPUT
+          echo "author=$(echo "$PR" | jq -r '.user.login')" >> $GITHUB_OUTPUT
+          # 文字列として渡したいのでJSONをそのまま文字列で保持
+          echo "changed_files=$FILES_JSON" >> $GITHUB_OUTPUT
+
+      # --- Dify Workflow 実行 ---
       - name: Call Dify Workflow
         if: steps.guard.outputs.skip != 'true'
         id: dify
         env:
-          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}
-          DIFY_API_BASE: ${{ secrets.DIFY_API_BASE }}
+          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}         # Workflowアプリの Server-side API Key
+          DIFY_API_BASE: ${{ secrets.DIFY_API_BASE }}       # 例: https://dify-novagrid.com/v1
+          DIFY_WORKFLOW_ID: ${{ secrets.DIFY_WORKFLOW_ID }} # 例: uNCqCaZfykMRl1r6
         run: |
           sudo apt-get update -y && sudo apt-get install -y jq
-          BODY=$(jq -n --arg diff "$(cat diff.trunc.patch)" \
-                      --arg repo "${{ github.repository }}" \
-                      --arg pr   "${{ github.event.number }}" \
-                      --arg user "${{ github.actor }}" \
+          BODY=$(jq -n \
+            --arg diff  "$(cat diff.trunc.patch)" \
+            --arg repo  "${{ github.repository }}" \
+            --arg pr    "${{ github.event.number }}" \
+            --arg user  "${{ github.actor }}" \
+            --arg author "${{ steps.meta.outputs.author }}" \
+            --arg title  "${{ steps.meta.outputs.title }}" \
+            --arg body   "${{ steps.meta.outputs.body }}" \
+            --arg changed_files "${{ steps.meta.outputs.changed_files }}" \
             '{
-               inputs: { code_diff: $diff, repo: $repo, pr_number: $pr },
+               inputs: {
+                 code_diff: $diff,
+                 repo: $repo,
+                 pr_number: ($pr|tonumber),
+                 author: $author,
+                 title: $title,
+                 body: $body,
+                 changed_files: $changed_files   # ← 文字列で送る
+               },
                response_mode: "blocking",
                user: $user
              }')
-          curl -sS -H "Authorization: Bearer $DIFY_API_KEY" \
-               -H "Content-Type: application/json" \
-               -d "$BODY" \
-               "$DIFY_API_BASE/workflows/run" > dify.json
 
-          echo "RAW=$(cat dify.json | jq -r '.data.outputs // {}' | base64 -w0)" >> $GITHUB_OUTPUT
+          RESP=$(curl -sS -w "\n%{http_code}" \
+            -H "Authorization: Bearer $DIFY_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "$DIFY_API_BASE/workflows/${DIFY_WORKFLOW_ID}/run")
 
-      - name: Extract review text
-        if: steps.guard.outputs.skip != 'true'
-        id: review
-        run: |
-          echo "${{ fromJSON(steps.dify.outputs.RAW).review 
-                || fromJSON(steps.dify.outputs.RAW).output
-                || fromJSON(steps.dify.outputs.RAW).text
-                || 'レビュー結果の取得に失敗しました。' }}" > review.md
+          HTTP_CODE=$(echo "$RESP" | tail -n1)
+          JSON=$(echo "$RESP" | sed '$d')
+          echo "HTTP_CODE=$HTTP_CODE"
+          echo "$JSON" > dify.json
+          # 必要ならログで確認
+          jq -r '.' dify.json || true
 
+          # 応答の取り出し（キー名の揺れに広く対応）
+          echo "RAW=$(jq -r '
+            .data.outputs.result
+            // .data.outputs.review
+            // .data.outputs.output
+            // .data.outputs.text
+            // .data.result
+            // .result
+            // .message
+            // {}
+          ' dify.json | base64 -w0)" >> $GITHUB_OUTPUT
+
+      # --- PRにコメント投稿 ---
       - name: Post PR comment
         if: steps.guard.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          REVIEW="$(echo "${{ steps.dify.outputs.RAW }}" | base64 -d)"
+          {
+            echo "### 🤖 Dify 規約レビュー"
+            echo
+            echo "\`\`\`"
+            echo "$REVIEW"
+            echo "\`\`\`"
+          } > review.md
+
           gh api repos/${{ github.repository }}/issues/${{ github.event.number }}/comments \
             -f body="$(cat review.md)"
