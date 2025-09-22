@@ -155,7 +155,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # review_raw.json が「JSON文字列」なら fromjson でオブジェクト化
           jq -r '
             def ensure_obj($x):
               if $x|type == "object" then $x
@@ -163,17 +162,20 @@ jobs:
               else {"raw":($x|tostring)}
               end;
       
-            # まずファイル全体を読み、それをオブジェクト化
-            (input) as $raw
+            . as $raw                         # ← input を使わず、現在の入力をそのまま使う
             | (ensure_obj($raw)) as $r
       
-            | if ($r.violations or $r.improvements or $r.notes) then
+            | if ((($r.violations // [])|length) > 0
+                  or (($r.improvements // [])|length) > 0
+                  or (($r.notes // [])|length) > 0) then
+      
                 "### 🤖 Dify ABAP レビュー結果\n" +
+      
                 "\n#### 🚨 違反 (Violations)\n" +
-                ( if ($r.violations|length) > 0 then
+                ( if (($r.violations // [])|length) > 0 then
                     "| ルールID | 重大度 | 場所 | 内容 |\n" +
                     "|----------|--------|------|------|\n" +
-                    ( $r.violations[] |
+                    ( ($r.violations // [])[] |
                       "| " + (.rule_id|tostring) + " | " +
                       (if .severity=="block" then "❌ block" else "⚠️ warn" end) + " | " +
                       .location + " | " + .message + " |"
@@ -182,24 +184,26 @@ jobs:
                     "_No violations_\n"
                   end
                 ) +
+      
                 "\n\n#### 🛠 改善提案 (Improvements)\n" +
-                ( if ($r.improvements|length) > 0 then
-                    ( $r.improvements[]
+                ( if (($r.improvements // [])|length) > 0 then
+                    ( ($r.improvements // [])[]
                       | "**" + .title + "**\n説明: " + .explanation + "\n```abap\n" + .code + "\n```\n"
                     )
                   else
                     "_No suggestions_\n"
                   end
                 ) +
+      
                 "\n#### 📝 備考\n" +
-                ( if ($r.notes|length) > 0 then
-                    ( $r.notes[] | "- " + . ) | join("\n")
+                ( if (($r.notes // [])|length) > 0 then
+                    ( ($r.notes // []) | map("- " + .) | join("\n") )
                   else
                     "_No notes_"
                   end
                 )
+      
               else
-                # 期待するキーが無い場合は生出力を表示
                 "### 🤖 Dify ABAP レビュー結果\n\n```\n" + ($raw|tostring) + "\n```"
               end
           ' review_raw.json > review.md
