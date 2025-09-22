@@ -302,10 +302,10 @@ jobs:
             | ($r.notes       // []) as $n_raw
             | ($r.raw         // null) as $raw_only
 
-            # --- 重複排除 ---
-            | ($v_raw | (type=="array"    ? unique_by(.rule_id)           : [])) as $viol
-            | ($i_raw | (type=="array"    ? unique_by([.title, .code])    : [])) as $impr
-            | ($n_raw | (type=="array"    ? unique                        : [])) as $notes
+          # --- 重複排除（※ 三項演算子ではなく if-then-else-end を使う）---
+            | ($v_raw | if type=="array" then unique_by(.rule_id) else [] end)          as $viol
+            | ($i_raw | if type=="array" then unique_by([.title, .code]) else [] end)   as $impr
+            | ($n_raw | if type=="array" then unique else [] end)                        as $notes
 
             # --- 出力を作る ---
             | if (((($viol | length) + ($impr | length) + ($notes | length)) == 0) and ($raw_only != null)) then
