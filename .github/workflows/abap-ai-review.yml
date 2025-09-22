@@ -75,7 +75,7 @@ jobs:
             --arg author "${{ steps.meta.outputs.author }}" \
             --arg title  "${{ steps.meta.outputs.title }}" \
             --arg body   "${{ steps.meta.outputs.body }}" \
-            --arg changed_files "$(echo "${{ steps.meta.outputs.changed_files }}" | jq -c .)"\
+            --arg changed_files "${{ steps.meta.outputs.changed_files }}" \
             '{
                inputs: {
                  code_diff: $diff,
