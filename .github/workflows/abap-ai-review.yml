@@ -66,6 +66,16 @@ jobs:
           DIFY_API_BASE: ${{ secrets.DIFY_API_BASE }}       # 例: https://dify-novagrid.com/v1
           DIFY_WORKFLOW_ID: ${{ secrets.DIFY_WORKFLOW_ID }} # 例: uNCqCaZfykMRl1r6
         run: |
+          # --- 事前チェック（空や末尾スラ対応） ---
+          # --- 事前チェック（空や末尾スラ対応） ---
+          if [ -z "${DIFY_WORKFLOW_ID:-}" ]; then
+            echo "ERROR: DIFY_WORKFLOW_ID is empty. Set repository secret."
+            exit 1
+          fi
+          API_BASE="${DIFY_API_BASE%/}"   # 末尾/を除去
+          URL="$API_BASE/workflows/$DIFY_WORKFLOW_ID/run"
+          echo "Call URL: $URL"
+
           sudo apt-get update -y && sudo apt-get install -y jq
           BODY=$(jq -n \
             --arg diff  "$(cat diff.trunc.patch)" \
@@ -90,11 +100,12 @@ jobs:
                user: $user
              }')
 
-          RESP=$(curl -sS -w "\n%{http_code}" \
-            -H "Authorization: Bearer $DIFY_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d "$BODY" \
-            "$DIFY_API_BASE/workflows/${DIFY_WORKFLOW_ID}/run")
+           RESP=$(curl -sS -fSL -w "\n%{http_code}" \
+              -H "Authorization: Bearer $DIFY_API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "$BODY" \
+              "$URL")
+
         
           HTTP_CODE=$(echo "$RESP" | tail -n1)
           JSON=$(echo "$RESP" | sed '$d')
