@@ -46,14 +46,20 @@ jobs:
                       --arg pr   "${{ github.event.number }}" \
                       --arg user "${{ github.actor }}" \
             '{
-               inputs: { code_diff: $diff, repo: $repo, pr_number: $pr },
+               inputs: { code_diff: $diff, repo: $repo, pr_number: ($pr|tonumber), author: $user},
                response_mode: "blocking",
                user: $user
              }')
-          curl -sS -H "Authorization: Bearer $DIFY_API_KEY" \
-               -H "Content-Type: application/json" \
-               -d "$BODY" \
-               "$DIFY_API_BASE/workflows/run" > dify.json
+          RESP=$(curl -sS -w "\n%{http_code}" \
+            -H "Authorization: Bearer $DIFY_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "$DIFY_API_BASE/workflows/${DIFY_WORKFLOW_ID:-<YOUR_WORKFLOW_ID>}/run")
+          
+          HTTP_CODE=$(echo "$RESP" | tail -n1)
+          JSON=$(echo "$RESP" | sed '$d')
+          echo "$JSON" > dify.json
+
 
           echo "RAW=$(cat dify.json | jq -r '.data.outputs // {}' | base64 -w0)" >> $GITHUB_OUTPUT
 
