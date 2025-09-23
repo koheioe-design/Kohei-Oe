@@ -163,7 +163,7 @@ jobs:
           else
             jq -R -s '{raw: .}' review_raw.json > _tmp.json && mv _tmp.json review_raw.json
           fi
-
+          
       - name: Format Dify output to Markdown (single source of truth)
         if: steps.guard.outputs.skip != 'true'
         shell: bash
@@ -178,18 +178,23 @@ jobs:
 
           def fix_md:
             .
-            | gsub("\\\\r"; "")
-            | gsub("\\\\n"; "\n")
-            | gsub("\r"; "")
-            | gsub("\n(?:abap|ABAP)\n(?:abap|ABAP)\n"; "\n```abap\n")
-            | gsub("\n(?:abap|ABAP)\n"; "\n```abap\n")
-            | gsub("\n\n\n+"; "\n```\n\n")
-            | (if test("(?s).*```abap(?!.*```)$") then . + "\n```\n" else . end);
+            | gsub("\\\\r\\\\n|\\\\n|\\\\r"; "\n")
+            | gsub("\\n"; "\n")
+            | gsub("`abap\\n`abap\\n"; "\n```abap\n")
+            | gsub("`abap\\n`"; "\n```abap\n")
+            | gsub("`\\n`"; "\n```\n")
+            | gsub("\\*\\*([^*]+)\\*\\*"; "**\\1**")
+            | gsub("\n```\n\n```abap\n"; "\n```abap\n")
+            | gsub("\n```\n```"; "\n```")
+            | (if test("```abap[^`]*$") then . + "\n```" else . end);
 
           def sev($s):
-            if   $s=="block" then "❌ block"
-            elif $s=="warn"  then "⚠️ warn"
-            else ($s // "info") end;
+            if   $s=="block" then "❌ **BLOCK**"
+            elif $s=="warn"  then "⚠️ **WARN**"
+            else "ℹ️ **INFO**" end;
+
+          def clean_text($text):
+            $text | gsub("\\n"; " ") | gsub("\\s+"; " ") | gsub("^\\s+|\\s+$"; "");
 
           . as $raw_text |
           (ensure_obj($raw_text)) as $r |
@@ -203,30 +208,32 @@ jobs:
           if ((($viol|length)+($impr|length)+($notes|length))==0 and ($raw_only!=null)) then
             ( $raw_only | fix_md )
           else
-            "### 🤖 Dify ABAP レビュー結果\n" +
-            "\n#### 🚨 違反 (Violations)\n" +
+            "## 🤖 Dify ABAP レビュー結果\n\n" +
+            "### 🚨 違反 (Violations)\n\n" +
             ( if (($viol|length)>0) then
                 "| ルールID | 重大度 | 場所 | 内容 |\n" +
                 "|----------|--------|------|------|\n" +
                 ( [ $viol[] |
-                    "| " + (.rule_id|tostring) + " | " +
+                    "| `" + (.rule_id|tostring) + "` | " +
                     sev(.severity) + " | " +
-                    (.location // "-") + " | " +
-                    (.message  // "-") + " |"
-                  ] | join("\n") )
-              else "_No violations_" end ) +
-            "\n\n#### 🛠 改善提案 (Improvements)\n" +
+                    ("`" + (.location // "-") + "`") + " | " +
+                    clean_text(.message // "-") + " |"
+                  ] | join("\n") ) + "\n"
+              else "違反は検出されませんでした ✅\n" end ) +
+            "\n### 🛠️ 改善提案 (Improvements)\n\n" +
             ( if (($impr|length)>0) then
                 ( [ $impr[] |
-                    "**" + (.title // "Suggestion") + "**\n" +
-                    "説明: " + (.explanation // "-") + "\n" +
-                    "```abap\n" + (.code // "") + "\n```\n"
+                    "#### " + (.title // "改善提案") + "\n\n" +
+                    (.explanation // "詳細情報なし") + "\n\n" +
+                    (if (.code // "") != "" then
+                      "```abap\n" + (.code // "") + "\n```\n"
+                    else "" end)
                   ] | join("\n") )
-              else "_No suggestions_" end ) +
-            "\n\n#### 📝 備考\n" +
+              else "改善提案はありません ✅\n" end ) +
+            "\n### 📝 備考 (Notes)\n\n" +
             ( if (($notes|length)>0)
               then ($notes | map("- " + .) | join("\n"))
-              else "_No notes_" end )
+              else "追加の備考はありません\n" end )
           end |
           fix_md
           JQ
@@ -234,15 +241,20 @@ jobs:
           # 構文チェック（任意）
           jq -n -f _format.jq '{}' >/dev/null
 
-          jq -R -s -f _format.jq review_raw.json > review.md
+          # JSONをMarkdownに変換
+          jq -R -s -f _format.jq review_raw.json > review_temp.md
+          
+          # 改行文字を実際の改行に変換し、余分な改行を整理
+          sed 's/\\n/\n/g' review_temp.md | \
+          sed '/^$/N;/^\n$/d' | \
+          sed 's/```$/```\n/' > review.md
 
           {
-            echo "### Rendered Review (preview)"
+            echo "### 📋 Rendered Review (preview)"
             echo
             cat review.md
           } >> "$GITHUB_STEP_SUMMARY"
 
-    
 
       # --- Block違反があればFail ---
       - name: Fail if block violations exist (with details)
