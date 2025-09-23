@@ -185,15 +185,26 @@ jobs:
           set -euo pipefail
 
           cat > _format.jq <<'JQ'
-          def ensure_obj($x):
-            if ($x|type)=="object" then $x
-            elif ($x|type)=="string" then (try ($x|fromjson) catch {"raw":$x})
-            else {"raw":($x|tostring)} end;
+        def ensure_obj($x):
+          if ($x|type)=="object" then $x
+          elif ($x|type)=="string" then (try ($x|fromjson) catch {"raw":$x})
+          else {"raw":($x|tostring)} end;
 
-          def sev($s):
-            if   $s=="block" then "❌ block"
-            elif $s=="warn"  then "⚠️ warn"
-            else ($s // "info") end;
+        # 改行・コードフェンス整形（abap → ```abap）
+        def fix_md:
+          .
+          | gsub("\\\\r"; "")
+          | gsub("\\\\n"; "\n")
+          | gsub("\r"; "")
+          | gsub("\n(?:abap|ABAP)\n(?:abap|ABAP)\n"; "\n```abap\n")
+          | gsub("\n(?:abap|ABAP)\n"; "\n```abap\n")
+          | gsub("\n\n\n+"; "\n```\n\n")
+          | (if test("(?s).*```abap(?!.*```)$") then . + "\n```\n" else . end);
+        
+        def sev($s):
+          if   $s=="block" then "❌ block"
+          elif $s=="warn"  then "⚠️ warn"
+          else ($s // "info") end;
 
           . as $raw_text
           | (ensure_obj($raw_text)) as $r
@@ -201,52 +212,51 @@ jobs:
           | ($r.improvements // []) as $i_raw
           | ($r.notes        // []) as $n_raw
           | ($r.raw          // null) as $raw_only
-          | ($v_raw | if type=="array" then unique_by(.rule_id) else [] end)        as $viol
-          | ($i_raw | if type=="array" then unique_by([.title,.code]) else [] end)  as $impr
-          | ($n_raw | if type=="array" then unique else [] end)                      as $notes
+          | ($v_raw | if type=="array" then unique_by(.rule_id) else [] end)       as $viol
+          | ($i_raw | if type=="array" then unique_by([.title,.code]) else [] end) as $impr
+          | ($n_raw | if type=="array" then unique else [] end)                    as $notes
           | if ((($viol|length)+($impr|length)+($notes|length))==0 and ($raw_only!=null)) then
-              ( $raw_only | gsub("\\r"; "") | gsub("\\n"; "\n") )
-              | gsub("\r"; "")
-              | gsub("\nabap\nabap\n"; "\n```abap\n")
-              | gsub("\nabap\n"; "\n```abap\n")
-              | gsub("\n\n\n"; "\n```\n\n")
-              | (if test("(?s).*```abap(?!.*```)$") then . + "\n```\n" else . end)
-            else
-              "### 🤖 Dify ABAP レビュー結果\n"
-              + "\n#### 🚨 違反 (Violations)\n"
-              + ( if (($viol|length)>0) then
-                    "| ルールID | 重大度 | 場所 | 内容 |\n"
-                    + "|----------|--------|------|------|\n"
-                    + ( [ $viol[]
-                        | "| " + (.rule_id|tostring) + " | "
-                        + sev(.severity) + " | "
-                        + (.location // "-") + " | "
-                        + (.message  // "-") + " |"
-                      ] | join("\n") )
-                  else "_No violations_" end )
-              + "\n\n#### 🛠 改善提案 (Improvements)\n"
-              + ( if (($impr|length)>0) then
-                    ( [ $impr[]
-                        | "**" + (.title // "Suggestion") + "**\n"
-                        + "説明: " + (.explanation // "-") + "\n"
-                        + "```abap\n" + (.code // "") + "\n```\n"
-                      ] | join("\n") )
-                  else "_No suggestions_" end )
-              + "\n\n#### 📝 備考\n"
-              + ( if (($notes|length)>0)
-                  then ($notes | map("- " + .) | join("\n"))
-                  else "_No notes_" end )
+              ( $raw_only | fix_md )      
+              else
+                "### 🤖 Dify ABAP レビュー結果\n"
+                + "\n#### 🚨 違反 (Violations)\n"
+                + ( if (($viol|length)>0) then
+                      "| ルールID | 重大度 | 場所 | 内容 |\n"
+                      + "|----------|--------|------|------|\n"
+                      + ( [ $viol[]
+                          | "| " + (.rule_id|tostring) + " | "
+                          + sev(.severity) + " | "
+                          + (.location // "-") + " | "
+                          + (.message  // "-") + " |"
+                        ] | join("\n") )
+                    else "_No violations_" end )
+                + "\n\n#### 🛠 改善提案 (Improvements)\n"
+                + ( if (($impr|length)>0) then
+                      ( [ $impr[]
+                          | "**" + (.title // "Suggestion") + "**\n"
+                          + "説明: " + (.explanation // "-") + "\n"
+                          + "```abap\n" + (.code // "") + "\n```\n"
+                        ] | join("\n") )
+                    else "_No suggestions_" end )
+                + "\n\n#### 📝 備考\n"
+                + ( if (($notes|length)>0)
+                    then ($notes | map("- " + .) | join("\n"))
+                    else "_No notes_" end )
             end
+          | fix_md  # ← 最後にまとめて適用
+
           JQ
+  
+              jq -R -s -f _format.jq review_raw.json > review.md
+          
+              {
+                echo "### Rendered Review (preview)"
+                echo
+                cat review.md
+              } >> "$GITHUB_STEP_SUMMARY"
 
-          jq -R -s -f _format.jq review_raw.json > review.md
-
-          {
-            echo "### Rendered Review (preview)"
-            echo
-            cat review.md
-          } >> "$GITHUB_STEP_SUMMARY"
-
+          
+          
       # --- Block違反があればFail（詳細付き） ---
       - name: Fail if block violations exist (with details)
         if: steps.guard.outputs.skip != 'true'
