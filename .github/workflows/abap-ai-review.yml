@@ -36,18 +36,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # baseを確実に取得（失敗時は無視して続行）
           git fetch origin "${{ github.base_ref }}" --depth=50 || true
-
-          # 3点ドットでマージベース基準の差分
           git diff --unified=0 "origin/${{ github.base_ref }}...HEAD" \
             -- '*.abap' '*.prog.abap' '*.clas.abap' '*.intf.abap' '*.incl.abap' > diff.patch || true
-
-          # 可変上限でトランケート
           head -c "${DIFF_MAX_BYTES}" diff.patch > diff.trunc.patch || true
           wc -c diff.trunc.patch || true
 
-      # --- 差分が無ければスキップ ---
       - name: Skip if no diff
         id: guard
         shell: bash
@@ -57,7 +51,6 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # --- PRメタ情報の収集 ---
       - name: Collect PR metadata
         if: steps.guard.outputs.skip != 'true'
         id: meta
@@ -86,7 +79,6 @@ jobs:
             echo "__EOF__"
           } >> "$GITHUB_OUTPUT"
 
-      # --- Dify Workflow 実行 ---
       - name: Call Dify Workflow
         if: steps.guard.outputs.skip != 'true'
         id: dify
@@ -98,7 +90,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 必須シークレットの存在チェック
           [ -n "${DIFY_API_KEY:-}" ]     || { echo "ERROR: DIFY_API_KEY is empty."; exit 1; }
           [ -n "${DIFY_API_BASE:-}" ]    || { echo "ERROR: DIFY_API_BASE is empty."; exit 1; }
           [ -n "${DIFY_WORKFLOW_ID:-}" ] || { echo "ERROR: DIFY_WORKFLOW_ID is empty."; exit 1; }
@@ -108,7 +99,6 @@ jobs:
             _base="$_base/v1"
           fi
           URL="$_base/workflows/run"
-          echo "Call URL: $URL"
 
           BODY=$(jq -n \
             --arg wid   "${DIFY_WORKFLOW_ID}" \
@@ -143,15 +133,12 @@ jobs:
 
           HTTP_CODE=$(echo "$RESP" | tail -n1)
           JSON=$(echo "$RESP" | sed '$d')
-          echo "HTTP_CODE=$HTTP_CODE"
           echo "$JSON" > dify.json
 
           if ! echo "$HTTP_CODE" | grep -qE '^2[0-9][0-9]$'; then
-            # 非2xx: プレーン連結（後段でRモードslurp→{raw:..}包み）
             echo "(Dify error; HTTP_CODE=$HTTP_CODE)" > review_raw.json
             cat dify.json >> review_raw.json
           else
-            # 正常: reviewフィールド優先
             jq -r '
               if .data? and .data.outputs? and (.data.outputs.review? // empty) then
                 .data.outputs.review
@@ -165,7 +152,6 @@ jobs:
             ' dify.json > review_raw.json
           fi
 
-          # JSON検証とラッピング（文字列や非JSONに対応）
           if jq -e . review_raw.json >/dev/null 2>&1; then
             if jq -e 'type=="string"' review_raw.json >/dev/null 2>&1; then
               if jq -e 'fromjson | . as $x | ($x|type=="object" or $x|type=="array")' review_raw.json >/dev/null 2>&1; then
@@ -185,79 +171,76 @@ jobs:
           set -euo pipefail
 
           cat > _format.jq <<'JQ'
-        def ensure_obj($x):
-          if ($x|type)=="object" then $x
-          elif ($x|type)=="string" then (try ($x|fromjson) catch {"raw":$x})
-          else {"raw":($x|tostring)} end;
+def ensure_obj($x):
+  if ($x|type)=="object" then $x
+  elif ($x|type)=="string" then (try ($x|fromjson) catch {"raw":$x})
+  else {"raw":($x|tostring)} end;
 
-        # 改行・コードフェンス整形（abap → ```abap）
-        def fix_md:
-          .
-          | gsub("\\\\r"; "")
-          | gsub("\\\\n"; "\n")
-          | gsub("\r"; "")
-          | gsub("\n(?:abap|ABAP)\n(?:abap|ABAP)\n"; "\n```abap\n")
-          | gsub("\n(?:abap|ABAP)\n"; "\n```abap\n")
-          | gsub("\n\n\n+"; "\n```\n\n")
-          | (if test("(?s).*```abap(?!.*```)$") then . + "\n```\n" else . end);
-        
-        def sev($s):
-          if   $s=="block" then "❌ block"
-          elif $s=="warn"  then "⚠️ warn"
-          else ($s // "info") end;
+def fix_md:
+  .
+  | gsub("\\\\r"; "")
+  | gsub("\\\\n"; "\n")
+  | gsub("\r"; "")
+  | gsub("\n(?:abap|ABAP)\n(?:abap|ABAP)\n"; "\n```abap\n")
+  | gsub("\n(?:abap|ABAP)\n"; "\n```abap\n")
+  | gsub("\n\n\n+"; "\n```\n\n")
+  | (if test("(?s).*```abap(?!.*```)$") then . + "\n```\n" else . end);
 
-          . as $raw_text
-          | (ensure_obj($raw_text)) as $r
-          | ($r.violations   // []) as $v_raw
-          | ($r.improvements // []) as $i_raw
-          | ($r.notes        // []) as $n_raw
-          | ($r.raw          // null) as $raw_only
-          | ($v_raw | if type=="array" then unique_by(.rule_id) else [] end)       as $viol
-          | ($i_raw | if type=="array" then unique_by([.title,.code]) else [] end) as $impr
-          | ($n_raw | if type=="array" then unique else [] end)                    as $notes
-          | if ((($viol|length)+($impr|length)+($notes|length))==0 and ($raw_only!=null)) then
-              ( $raw_only | fix_md )      
-              else
-                "### 🤖 Dify ABAP レビュー結果\n"
-                + "\n#### 🚨 違反 (Violations)\n"
-                + ( if (($viol|length)>0) then
-                      "| ルールID | 重大度 | 場所 | 内容 |\n"
-                      + "|----------|--------|------|------|\n"
-                      + ( [ $viol[]
-                          | "| " + (.rule_id|tostring) + " | "
-                          + sev(.severity) + " | "
-                          + (.location // "-") + " | "
-                          + (.message  // "-") + " |"
-                        ] | join("\n") )
-                    else "_No violations_" end )
-                + "\n\n#### 🛠 改善提案 (Improvements)\n"
-                + ( if (($impr|length)>0) then
-                      ( [ $impr[]
-                          | "**" + (.title // "Suggestion") + "**\n"
-                          + "説明: " + (.explanation // "-") + "\n"
-                          + "```abap\n" + (.code // "") + "\n```\n"
-                        ] | join("\n") )
-                    else "_No suggestions_" end )
-                + "\n\n#### 📝 備考\n"
-                + ( if (($notes|length)>0)
-                    then ($notes | map("- " + .) | join("\n"))
-                    else "_No notes_" end )
-            end
-          | fix_md  # ← 最後にまとめて適用
+def sev($s):
+  if   $s=="block" then "❌ block"
+  elif $s=="warn"  then "⚠️ warn"
+  else ($s // "info") end;
 
-          JQ
-  
-              jq -R -s -f _format.jq review_raw.json > review.md
-          
-              {
-                echo "### Rendered Review (preview)"
-                echo
-                cat review.md
-              } >> "$GITHUB_STEP_SUMMARY"
+. as $raw_text
+| (ensure_obj($raw_text)) as $r
+| ($r.violations   // []) as $v_raw
+| ($r.improvements // []) as $i_raw
+| ($r.notes        // []) as $n_raw
+| ($r.raw          // null) as $raw_only
+| ($v_raw | if type=="array" then unique_by(.rule_id) else [] end)       as $viol
+| ($i_raw | if type=="array" then unique_by([.title,.code]) else [] end) as $impr
+| ($n_raw | if type=="array" then unique else [] end)                    as $notes
+| if ((($viol|length)+($impr|length)+($notes|length))==0 and ($raw_only!=null)) then
+    ( $raw_only | fix_md )
+  else
+    "### 🤖 Dify ABAP レビュー結果\n"
+    + "\n#### 🚨 違反 (Violations)\n"
+    + ( if (($viol|length)>0) then
+          "| ルールID | 重大度 | 場所 | 内容 |\n"
+          + "|----------|--------|------|------|\n"
+          + ( [ $viol[]
+              | "| " + (.rule_id|tostring) + " | "
+              + sev(.severity) + " | "
+              + (.location // "-") + " | "
+              + (.message  // "-") + " |"
+            ] | join("\n") )
+        else "_No violations_" end )
+    + "\n\n#### 🛠 改善提案 (Improvements)\n"
+    + ( if (($impr|length)>0) then
+          ( [ $impr[]
+              | "**" + (.title // "Suggestion") + "**\n"
+              + "説明: " + (.explanation // "-") + "\n"
+              + "```abap\n" + (.code // "") + "\n```\n"
+            ] | join("\n") )
+        else "_No suggestions_" end )
+    + "\n\n#### 📝 備考\n"
+    + ( if (($notes|length)>0)
+        then ($notes | map("- " + .) | join("\n"))
+        else "_No notes_" end )
+  end
+| fix_md
+JQ
 
-          
-          
-      # --- Block違反があればFail（詳細付き） ---
+          jq -n -f _format.jq '{}' >/dev/null
+          jq -R -s -f _format.jq review_raw.json > review.md
+
+          {
+            echo "### Rendered Review (preview)"
+            echo
+            cat review.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # --- Block違反があればFail ---
       - name: Fail if block violations exist (with details)
         if: steps.guard.outputs.skip != 'true'
         shell: bash
@@ -276,16 +259,11 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "---- blocks detail (json) ----"
-          jq . _blocks.json || true
-          echo "------------------------------"
-
           if [ "$BLOCK_COUNT" -gt 0 ]; then
             echo "❌ Block violations detected: $BLOCK_COUNT"
             exit 1
           fi
 
-      # --- PRにコメント投稿 ---
       - name: Post PR comment
         if: steps.guard.outputs.skip != 'true'
         env:
@@ -296,7 +274,6 @@ jobs:
           gh api "repos/${{ github.repository }}/issues/${{ github.event.number }}/comments" \
             -f body="$(cat review.md)"
 
-      # --- オーバーライド判定（ラベル/コミット） ---
       - name: Check override (label / commit keyword)
         if: steps.guard.outputs.skip != 'true'
         id: override
@@ -320,7 +297,6 @@ jobs:
           fi
           echo "skip_fail=${SKIP}" >> "$GITHUB_OUTPUT"
 
-      # --- Policy enforcement ---
       - name: Enforce policy level (fail if violations)
         if: steps.guard.outputs.skip != 'true' && steps.override.outputs.skip_fail != 'true'
         shell: bash
