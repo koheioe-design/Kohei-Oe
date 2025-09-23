@@ -255,7 +255,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
 
-      # --- Block違反があればFail ---
+      # --- Block違反があればFail（詳細表示付き） ---
       - name: Fail if block violations exist (with details)
         if: steps.guard.outputs.skip != 'true'
         shell: bash
@@ -268,13 +268,25 @@ jobs:
             echo "### ❌ Block violations ($BLOCK_COUNT)"
             if [ "$BLOCK_COUNT" -gt 0 ]; then
               echo
+              echo "以下の重大な違反により、PRのマージが阻止されました："
+              echo
               echo "| ルールID | 重大度 | 場所 | 内容 |"
               echo "|---|---|---|---|"
-              jq -r '.[] | "| \(.rule_id) | \(.severity) | \(.location // "-") | \(.message // "-") |"' _blocks.json
+              jq -r '.[] | "| `\(.rule_id)` | ❌ \(.severity) | `\(.location // "-")` | \(.message // "-") |"' _blocks.json
+              echo
+              echo "**修正方法:**"
+              echo "1. 上記の違反を修正してコミットし直す"
+              echo "2. 緊急時は \`[abap-override]\` をコミットメッセージに追加"  
+              echo "3. または PRに \`abap-override\` ラベルを追加"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+          # Block違反の詳細をログにも出力
           if [ "$BLOCK_COUNT" -gt 0 ]; then
+            echo "🚫 CRITICAL: Block violations detected!"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            jq -r '.[] | "❌ \(.rule_id): \(.message // "No details") (\(.location // "Unknown location"))"' _blocks.json
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo "❌ Block violations detected: $BLOCK_COUNT"
             exit 1
           fi
